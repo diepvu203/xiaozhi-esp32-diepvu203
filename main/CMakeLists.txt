@@ -39,6 +39,8 @@ set(SOURCES "audio/audio_codec.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
+            "assets/emoji_default.c"
+            "assets/custom_emojis.c"
             "main.cc"
             )
 
