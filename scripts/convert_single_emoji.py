@@ -105,4 +105,4 @@ def convert_png_to_lvgl_i1(png_path, out_c_path, var_name="emoji_default", width
 if __name__ == '__main__':
     src = "D:/xiaozhi/bieucam/bieucam-macdinh.png"
     dst = "d:/xiaozhi/xiaozhi-esp32-diepvu203/main/assets/emoji_default.c"
-    convert_png_to_lvgl_i1(src, dst, var_name="emoji_default", width=64, height=64)
+    convert_png_to_lvgl_i1(src, dst, var_name="emoji_default", width=128, height=64)

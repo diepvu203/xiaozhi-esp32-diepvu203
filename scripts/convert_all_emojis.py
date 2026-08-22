@@ -59,7 +59,7 @@ def convert_png_to_i1_bytes(png_path, width=64, height=64, invert=True):
     
     return palette + pixel_bytes
 
-def process_directory(input_dir, output_c_file, output_h_file, width=64, height=64):
+def process_directory(input_dir, output_c_file, output_h_file, width=128, height=64):
     if not os.path.exists(input_dir):
         print(f"Directory {input_dir} not found!")
         return
@@ -173,4 +173,4 @@ if __name__ == '__main__':
     input_dir = "D:/xiaozhi/bieucam"
     c_out = "d:/xiaozhi/xiaozhi-esp32-diepvu203/main/assets/custom_emojis.c"
     h_out = "d:/xiaozhi/xiaozhi-esp32-diepvu203/main/assets/custom_emojis.h"
-    process_directory(input_dir, c_out, h_out)
+    process_directory(input_dir, c_out, h_out, width=128, height=64)
