@@ -42,6 +42,8 @@ set(SOURCES "audio/audio_codec.cc"
             "assets/emoji_default.c"
             "assets/custom_emojis.c"
             "assets/custom_emojis.h"
+            "assets/custom_gifs.c"
+            "assets/custom_gifs.h"
             "main.cc"
             )
 

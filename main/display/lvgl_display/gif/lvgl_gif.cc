@@ -58,6 +58,9 @@ void LvglGif::Start() {
         return;
     }
 
+    // Force infinite loop for OLED display
+    gif_->loop_count = 0;
+
     if (!timer_) {
         timer_ = lv_timer_create([](lv_timer_t* timer) {
             LvglGif* gif_obj = static_cast<LvglGif*>(lv_timer_get_user_data(timer));

@@ -12,6 +12,7 @@
 #include <material_symbols.h>
 #include <noto_emoji.h>
 #include "assets/custom_emojis.h"
+#include "assets/custom_gifs.h"
 
 #define TAG "OledDisplay"
 
@@ -274,6 +275,25 @@ void OledDisplay::SetupUI_128x32() {
 void OledDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
     if (emotion_img_ != nullptr) {
+        // Stop any running GIF animation
+        if (gif_controller_) {
+            gif_controller_->Stop();
+            gif_controller_.reset();
+        }
+        // Check if there's a custom GIF for this emotion
+        const lv_image_dsc_t* gif_img = GetCustomGifImage(emotion);
+        if (gif_img != nullptr) {
+            gif_controller_ = std::make_unique<LvglGif>(gif_img);
+            if (gif_controller_->IsLoaded()) {
+                gif_controller_->SetFrameCallback(
+                    [this]() { lv_image_set_src(emotion_img_, gif_controller_->image_dsc()); });
+                lv_image_set_src(emotion_img_, gif_controller_->image_dsc());
+                gif_controller_->Start();
+                return;
+            }
+            gif_controller_.reset();
+        }
+        // Fallback to static custom emoji
         const lv_image_dsc_t* custom_img = GetCustomEmojiImage(emotion);
         if (custom_img != nullptr) {
             lv_image_set_src(emotion_img_, custom_img);
