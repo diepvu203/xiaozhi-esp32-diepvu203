@@ -31,8 +31,7 @@
 #define BUILTIN_LED_GPIO        GPIO_NUM_48
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 #define TOUCH_BUTTON_GPIO       GPIO_NUM_47
-#define VOLUME_UP_BUTTON_GPIO   GPIO_NUM_40
-#define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_39
+// GPIO39/40 da chuyen sang dung cho cam bien ToF VL53L0X (bo 2 nut am luong)
 
 #define DISPLAY_SDA_PIN GPIO_NUM_41
 #define DISPLAY_SCL_PIN GPIO_NUM_42
@@ -53,7 +52,20 @@
 #define DISPLAY_MIRROR_Y true
 
 
-// A MCP Test: Control a lamp
-#define LAMP_GPIO GPIO_NUM_18
+// A MCP Test: Control a lamp (LED connected to GPIO 11)
+#define LAMP_GPIO GPIO_NUM_11
+
+// Motor driver L298N (2x N20 wheel motors)
+// ENA/ENB cua L298N noi muc cao co dinh (toc do khong doi)
+#define MOTOR_L_IN1 GPIO_NUM_1   // Left motor IN1
+#define MOTOR_L_IN2 GPIO_NUM_2   // Left motor IN2
+#define MOTOR_R_IN1 GPIO_NUM_21  // Right motor IN3
+#define MOTOR_R_IN2 GPIO_NUM_8   // Right motor IN4
+
+// Cam bien ToF VL53L0X (chong roi khoi mat ban)
+// LUU Y: KHONG dung GPIO35/36/37 - cac chan nay cua PSRAM octal tren ESP32-S3
+#define TOF_I2C_SDA GPIO_NUM_40
+#define TOF_I2C_SCL GPIO_NUM_39
+#define TOF_XSHUT   GPIO_NUM_10
 
 #endif // _BOARD_CONFIG_H_

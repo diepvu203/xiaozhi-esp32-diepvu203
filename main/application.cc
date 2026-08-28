@@ -656,7 +656,10 @@ void Application::InitializeProtocol() {
             }
 #endif
         } else {
-            ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
+            char* message_json = cJSON_PrintUnformatted(root);
+            ESP_LOGW(TAG, "Unknown message type: %s, content: %s", type->valuestring,
+                     message_json ? message_json : "(null)");
+            cJSON_free(message_json);
         }
     });
 
@@ -827,6 +830,10 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+
+    // Give the board a chance to react physically (e.g. motor wiggle feedback).
+    // Default implementation is a no-op; see Board::OnWakeWordDetected().
+    Board::GetInstance().OnWakeWordDetected();
 
     if (state == kDeviceStateIdle) {
         BeginWakeWordInvoke(wake_word);

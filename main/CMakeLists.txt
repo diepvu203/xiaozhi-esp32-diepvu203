@@ -1042,6 +1042,22 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
+# bread-compact-wifi (xe robot): driver VL53L0X cho cam bien chong roi.
+# Bien dich thang nguon .c cua components/vl53l0x vao main (co che component
+# discovery khong nhan component nay trong cau hinh MINIMAL_BUILD cua du an).
+if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
+    file(GLOB VL53L0X_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/src/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/private/core/src/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/private/platform/src/*.c"
+    )
+    list(APPEND SOURCES ${VL53L0X_SOURCES})
+    list(APPEND INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/private/core/inc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/private/platform/inc"
+    )
+endif()
 if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         m5stack__m5pm1
@@ -1093,6 +1109,11 @@ idf_component_register(SRCS ${SOURCES}
                         xiaozhi-fonts
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
+
+# Define cho driver VL53L0X (nguon goc dat PUBLIC USE_I2C_2V8=1)
+if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE USE_I2C_2V8=1)
+endif()
 
 # Use target_compile_definitions to define the reported board identity
 # If BOARD_NAME is empty, use BOARD_TYPE

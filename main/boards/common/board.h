@@ -82,6 +82,11 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+
+    // Optional hook: called on the main task when a wake word is detected.
+    // Default no-op; boards with actuators (e.g. motors) may override to give
+    // physical feedback (wiggle, nod, ...) alongside the AI conversation.
+    virtual void OnWakeWordDetected() {}
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

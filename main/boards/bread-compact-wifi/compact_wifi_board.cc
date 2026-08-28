@@ -7,6 +7,8 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
+#include "motor_controller.h"
+#include "tof_sensor.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
 
@@ -29,8 +31,6 @@ private:
     Display* display_ = nullptr;
     Button boot_button_;
     Button touch_button_;
-    Button volume_up_button_;
-    Button volume_down_button_;
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -113,48 +113,38 @@ private:
             Application::GetInstance().StopListening();
         });
 
-        volume_up_button_.OnClick([this]() {
-            auto codec = GetAudioCodec();
-            auto volume = codec->output_volume() + 10;
-            if (volume > 100) {
-                volume = 100;
-            }
-            codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
-        });
+        // GPIO39/40 da chuyen sang cam bien ToF VL53L0X, bo 2 nut am luong
+    }
 
-        volume_up_button_.OnLongPress([this]() {
-            GetAudioCodec()->SetOutputVolume(100);
-            GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
-        });
-
-        volume_down_button_.OnClick([this]() {
-            auto codec = GetAudioCodec();
-            auto volume = codec->output_volume() - 10;
-            if (volume < 0) {
-                volume = 0;
-            }
-            codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
-        });
-
-        volume_down_button_.OnLongPress([this]() {
-            GetAudioCodec()->SetOutputVolume(0);
-            GetDisplay()->ShowNotification(Lang::Strings::MUTED);
-        });
+    // Motor giữ dạng static (chỉ khởi tạo 1 lần, MCP tool đăng ký trong
+    // constructor). Dùng accessor để cả InitializeTools() và hook
+    // OnWakeWordDetected() đều truy cập được cùng một đối tượng.
+    MotorController& GetMotor() {
+        static MotorController motor(MOTOR_L_IN1, MOTOR_L_IN2, MOTOR_R_IN1, MOTOR_R_IN2);
+        return motor;
     }
 
     // 物联网初始化，逐步迁移到 MCP 协议
     void InitializeTools() {
         static LampController lamp(LAMP_GPIO);
+        static TofSensor tof(TOF_I2C_SDA, TOF_I2C_SCL, TOF_XSHUT);
+        auto& motor = GetMotor();
+        if (tof.IsReady()) {
+            // ToF KHÔNG đo liên tục. Mỗi lệnh di chuyển sẽ đo 1 lần trước khi chạy
+            // (trong MotorController). Reader trả về khoảng cách (mm) xuống sàn.
+            TofSensor* tof_ptr = &tof;
+            motor.SetDistanceReader([tof_ptr]() {
+                return tof_ptr->ReadDistanceMm();
+            });
+        } else {
+            ESP_LOGW(TAG, "VL53L0X not ready; forward cliff guard disabled");
+        }
     }
 
 public:
     CompactWifiBoard() :
         boot_button_(BOOT_BUTTON_GPIO),
-        touch_button_(TOUCH_BUTTON_GPIO),
-        volume_up_button_(VOLUME_UP_BUTTON_GPIO),
-        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
+        touch_button_(TOUCH_BUTTON_GPIO) {
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
@@ -164,6 +154,12 @@ public:
     virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);
         return &led;
+    }
+
+    // Robot phản hồi vật lý khi được hô wake word: lắc lư vài nhịp.
+    void OnWakeWordDetected() override {
+        ESP_LOGI(TAG, "Wake word detected: wiggle feedback");
+        GetMotor().Wiggle();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
