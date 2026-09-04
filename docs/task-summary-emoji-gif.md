@@ -18,12 +18,13 @@ Màn hình OLED monochrome 1-bit, hiển thị emoji biểu cảm full màn hìn
 
 ### Tính năng robot xe (motor + ToF)
 
-- **Lắc lư phản hồi wake word**: khi được hô wake word, robot lắc trái/phải
-  ~2 nhịp (~0.6s) như phản hồi thân thiện. Cơ chế: hook
+- **Lắc lư phản hồi wake word**: khi được hô wake word, robot lắc nhanh
+  1 nhịp trái-phải (~0.1s, 50ms mỗi hướng). Cơ chế: hook
   `Board::OnWakeWordDetected()` (virtual no-op trong `board.h`, được gọi từ
-  `Application::HandleWakeWordDetectedEvent()`), board override → `MotorController::Wiggle()`
-  chạy trong task one-shot riêng (không block main task, không cản audio),
-  giữ `moving_forward_ = false` nên không đụng chống rơi/auto-stop.
+  `Application::HandleWakeWordDetectedEvent()` CHỈ khi state == Idle — sự kiện
+  wake word khi đang Listening/Speaking không lắc), board override →
+  `MotorController::Wiggle()` chạy trong task one-shot riêng (không block main
+  task, không cản audio), có cooldown 10s chống lắc trùng.
 
 ## 2. Trạng Thái Hiện Tại
 
@@ -264,17 +265,17 @@ Các lệnh cơ bản: tiến tới, đi lùi, xoay trái, xoay phải, dừng l
   đủ init cho bản clone nên luôn báo "Start not accepted").
 - Wrapper mới `main/boards/common/tof_sensor.h` (class `TofSensor`) bọc component:
   `vl53l0x_create/init/set_profile`, đo bằng `vl53l0x_single_measure()`.
-  `HasFloor()` trả về true nếu khoảng cách ≤ **70mm** (`kNoFloorMm`).
+  `HasFloor()` trả về true nếu khoảng cách ≤ **30mm** (`kNoFloorMm`).
 - `MotorController::SetDistanceReader(callback)`: đăng ký hàm đọc khoảng cách
   ToF (mm). Mỗi lệnh di chuyển sẽ đo 1 lần trước khi chạy (`MeasureDistanceBeforeMove()`).
 - **Task `motor_floor_monitor`**: đo cảm biến **chỉ khi motor đang chạy tiến**
   (`moving_forward_ == true`, poll ~30ms). Khi robot đứng yên / lùi / xoay thì
   không đo — đáp ứng yêu cầu "không đo liên tục khi không cần".
 - Với lệnh tiến (`forward`): đo trước, nếu khoảng cách
-  > `kNoFloorMm = 70` (hoặc 8191 = lỗi) thì **chặn** (không chạy) và trả lỗi
+  > `kNoFloorMm = 30` (hoặc 8191 = lỗi) thì **chặn** (không chạy) và trả lỗi
   cho LLM để AI nói cảnh báo. Lùi/xoay: đo (log) nhưng vẫn chạy.
 - **Trong lúc chạy tiến**, nếu `motor_floor_monitor` phát hiện mất sàn
-  (khoảng cách > 70mm) giữa chừng → tự dừng ngay + lùi `kBackOffMs = 200` để
+  (khoảng cách > 30mm) giữa chừng → tự dừng ngay + lùi `kBackOffMs = 200` để
   không rơi khỏi mép bàn.
 
 ### 4.3 Lỗi đã gặp & sửa (driver tối thiểu tự viết — đã bỏ, dùng component chuẩn)
@@ -305,7 +306,7 @@ Các lệnh cơ bản: tiến tới, đi lùi, xoay trái, xoay phải, dừng l
   cũ là `mm > 0 && mm <= kNoFloorMm` → `mm = 0` (có sàn rất gần) lại trả
   `false` (coi là mất sàn). → Sửa trong `compact_wifi_board.cc`:
   `return mm <= TofSensor::kNoFloorMm;` (0 mm là hợp lệ; mất sàn thật sự khi
-  đọc > 70 mm — `kNoFloorMm = 70` — hoặc 8191).
+  đọc > 30 mm — `kNoFloorMm = 30` — hoặc 8191).
 - **Robot chạy lùi mãi, kêu "dừng" không dừng**: hai lỗi logic trong
   `motor_controller.h`:
   1. `Stop()` không reset `moving_forward_` → sau lệnh dừng, cliff guard vẫn
@@ -324,7 +325,7 @@ Các lệnh cơ bản: tiến tới, đi lùi, xoay trái, xoay phải, dừng l
   → Sửa `CliffGuardLoop`: **luôn** poll sensor (cập nhật `cliff_detected_` theo
   trạng thái sàn hiện tại), nhưng chỉ tự dừng + lùi khi `moving_forward_` là
   `true`.
-- **Chốt ngưỡng chống rơi = 70mm**: `kNoFloorMm = 70`. Sensor đọc > 70 mm (hoặc
+- **Chốt ngưỡng chống rơi = 30mm**: `kNoFloorMm = 30`. Sensor đọc > 30 mm (hoặc
   8191 — lỗi/không có sàn) thì coi là "mất sàn" → dừng ngay. `mm = 0` (sát bàn)
   vẫn là có sàn.
 - **AI cảnh báo khi ở mép bàn**: tận dụng cơ chế sẵn có — trong
@@ -385,9 +386,30 @@ Các lệnh cơ bản: tiến tới, đi lùi, xoay trái, xoay phải, dừng l
 3. Dây motor đi tách biệt dây mic I2S; đặt L298N xa mic.
 4. Nếu còn nhiễu nhẹ: tăng noise suppression trong cấu hình AFE (sdkconfig).
 
+### 6.3b Phần cứng ĐÃ LẮP THỰC TẾ (cập nhật)
+- Tụ 104 (100nF) song song **2 cực mỗi động cơ** N20 — chống tia lửa/nhiễu EMI
+  từ chổi than ngay tại nguồn phát.
+- Tụ 104 (100nF) song song **đường 3.3V nuôi micro** (gần chân micro) — lọc
+  nhiễu nguồn cho mic INMP441, wake word ổn định hơn.
+- Tụ hóa **2200µF/16V song song nguồn 5V chính** (đầu vào chung) — chống sụt
+  áp khi motor khởi động/quay đổi chiều, tránh reset ESP32 và nhiễu audio.
+- Ghi chú: mục 6.3 dòng 2 là khuyến nghị ban đầu (100nF/motor + 470µF–1000µF);
+  thực tế đã lắp theo 6.3b này.
+
 ### 6.4 Cách xác nhận nhanh
 - Quay tay động cơ (không cấp điện) rồi nói lệnh → nghe được bình thường =
   chắc chắn do nhiễu điện, không phải firmware.
 - Cấp nguồn motor từ nguồn riêng → hết chứng tỏ do sụt áp/nhiễu nguồn.
 - [ ] Test trên phần cứng (giọng nói: "đi tới", "đi lùi", "xoay trái", "xoay phải", "dừng lại")
 - [ ] Sau này: thêm lệnh phức tạp (đi khoảng cách, PWM tốc độ, v.v.)
+
+## 7. Cấu hình AI trên server (xiaozhi.me)
+
+- **Tính cách / vai trò AI** chỉnh trực tiếp trên trang **xiaozhi.me** (phần
+  quản lý thiết bị → prompt/vai trò). Firmware không giữ prompt — đổi tính cách
+  không cần build lại.
+- Có thể **hướng dẫn AI gọi tool theo yêu cầu** bằng system prompt, ví dụ:
+  quy tắc di chuyển (chỉ tiến khi còn sàn), khi nào gọi
+  `self.motor.move`, khi nào cảnh báo mép bàn.
+- **Giới hạn prompt: ~2000 từ** (quan sát trên trang xiaozhi.me) — viết prompt
+  ngắn gọn, ưu tiên quy tắc quan trọng.

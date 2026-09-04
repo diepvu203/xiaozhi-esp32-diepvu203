@@ -831,11 +831,13 @@ void Application::HandleWakeWordDetectedEvent() {
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
-    // Give the board a chance to react physically (e.g. motor wiggle feedback).
+    // Give the board a chance to react physically (e.g. motor wiggle feedback)
+    // ONLY on the genuine wake-up moment (transition from Idle). Wake word
+    // events while Listening/Speaking are "re-triggers" and must not wiggle
+    // again, otherwise the robot nods multiple times per invocation.
     // Default implementation is a no-op; see Board::OnWakeWordDetected().
-    Board::GetInstance().OnWakeWordDetected();
-
     if (state == kDeviceStateIdle) {
+        Board::GetInstance().OnWakeWordDetected();
         BeginWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
@@ -919,6 +921,16 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     play_popup_on_listening_ = true;
     SetListeningMode(GetDefaultListeningMode());
 #endif
+}
+
+void Application::SendRobotAlert(const std::string& text) {
+    // Thread-safe: chỉ đóng gói và gửi qua protocol trong main task.
+    Schedule([this, text]() {
+        if (protocol_) {
+            ESP_LOGI(TAG, "Robot alert: %s", text.c_str());
+            protocol_->SendWakeWordDetected(text);
+        }
+    });
 }
 
 void Application::HandleStateChangedEvent() {

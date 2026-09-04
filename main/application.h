@@ -110,6 +110,12 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    /**
+     * Proactively send a "wake word detected" text to the server (thread-safe).
+     * Test channel for custom text: the server may feed `text` into the LLM as
+     * a user message. See docs/firmware-knowledge-notes.md section 2.2.
+     */
+    void SendRobotAlert(const std::string& text);
     void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }

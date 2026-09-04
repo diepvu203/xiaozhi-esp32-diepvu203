@@ -16,9 +16,9 @@
 class TofSensor {
 public:
     // Khoang cach (mm) toi mat ban: neu do lon hon nguong nay = khong thay san
-    // (mat canh bao: > 70mm la coi nhu sap roi, dung ngay). Chi nho: mm = 0
+    // (mat canh bao: > 30mm la coi nhu sap roi, dung ngay). Chi nho: mm = 0
     // (sensor rat sat ban) van la co san.
-    static constexpr uint16_t kNoFloorMm = 70;
+    static constexpr uint16_t kNoFloorMm = 30;
     // Gia tri tra ve khi loi do / het range
     static constexpr uint16_t kErrorMm = 8191;
 

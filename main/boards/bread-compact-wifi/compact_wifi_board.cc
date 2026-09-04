@@ -136,6 +136,16 @@ private:
             motor.SetDistanceReader([tof_ptr]() {
                 return tof_ptr->ReadDistanceMm();
             });
+            // Phát hiện mép bàn giữa chừng -> chủ động gửi text lên AI.
+            // KẾT QUẢ TEST (đã làm trên server xiaozhi.me): server TỪ CHỐI text
+            // tùy ý — "Detect is only for wake words, do not send long texts",
+            // hiện Alert ERROR + biểu cảm sad. Vì vậy TẮT gửi alert, chỉ giữ
+            // callback. Nếu sau này tự host server (cho phép text tùy ý) thì
+            // bật lại dòng Application::GetInstance().SendRobotAlert(msg).
+            motor.SetWakeNotifier([](const std::string& msg) {
+                ESP_LOGI(TAG, "Wake notifier (disabled, server rejects custom text): %s", msg.c_str());
+                // Application::GetInstance().SendRobotAlert(msg);
+            });
         } else {
             ESP_LOGW(TAG, "VL53L0X not ready; forward cliff guard disabled");
         }

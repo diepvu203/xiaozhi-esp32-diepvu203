@@ -37,13 +37,26 @@ public:
 
     // Ngưỡng chống rơi: khoảng cách (mm) xuống sàn. Đọc > kNoFloorMm (hoặc
     // kErrorMm do lỗi) = mất sàn -> chặn lệnh tiến. mm = 0 (sát bàn) vẫn an toàn.
-    static constexpr uint16_t kNoFloorMm = 70;
+    // 30mm: nhạy hơn để bảo vệ tốt hơn (robot chỉ cần nghiêng nhẹ/nhô mép là dừng).
+    static constexpr uint16_t kNoFloorMm = 30;
     // Giá trị trả về khi cảm biến không đọc được
     static constexpr uint16_t kErrorMm = 8191;
     // Chu kỳ kiểm tra sàn khi motor đang chạy tiến (chỉ đo khi đang chạy)
     static constexpr uint32_t kMonitorPollMs = 30;
     // Thời gian lùi lại khi phát hiện mất sàn giữa chừng
     static constexpr uint32_t kBackOffMs = 200;
+    // Giới hạn PHIÊN chạy: LLM hay gửi nhiều lệnh forward nối tiếp (mỗi lệnh
+    // tự auto-stop 1s) khiến robot chạy dài. Gộp các lệnh cách nhau < kRunGapMs
+    // thành 1 phiên, tối đa kMaxRunSessionMs rồi từ chối lệnh mới.
+    // LƯU Ý: kRunGapMs phải LỚN HƠN round-trip của 1 lệnh MCP (LLM suy nghĩ +
+    // network + chạy 1s + trả kết quả, thực tế ~1-3s) — nếu nhỏ hơn thì mỗi
+    // lệnh bị tính là phiên mới và giới hạn không bao giờ kích hoạt.
+    static constexpr uint32_t kMaxRunSessionMs = 3000;
+    static constexpr uint32_t kRunGapMs = 5000;
+    // Cooldown lắc lư: wake word thường bắn nhiều sự kiện (Idle + abort
+    // Speaking) nên trước đây robot lắc 2 lần. Sau khi lắc, bỏ qua hết trong
+    // khoảng thời gian này.
+    static constexpr uint64_t kWiggleCooldownMs = 10000;
 
     // auto_stop_ms: thời gian chạy tối đa mỗi lệnh di chuyển thông thường trước khi tự dừng.
     // Đặt 0 để chạy liên tục cho đến khi nhận lệnh "stop".
@@ -100,6 +113,43 @@ public:
         }
     }
 
+    // Phản hồi lắc lư khi nghe thấy wake word. Chạy trong task one-shot riêng
+    // để không block main task (không cản luồng mở audio channel). Giữ
+    // moving_forward_ = false nên không đụng cơ chế chống rơi / auto-stop.
+    // Đăng ký callback thông báo sự kiện (vd: phát hiện mép bàn giữa chừng)
+    // để board chủ động gửi text lên AI qua Application::SendRobotAlert().
+    void SetWakeNotifier(std::function<void(const std::string&)> cb) {
+        wake_notifier_ = std::move(cb);
+    }
+
+    void Wiggle() {
+        int64_t now = esp_timer_get_time();
+        if (wiggling_.exchange(true)) {
+            return;  // đang lắc, bỏ qua
+        }
+        if (last_wiggle_us_ != 0 && now - last_wiggle_us_ < (int64_t)kWiggleCooldownMs * 1000) {
+            wiggling_ = false;  // trong cooldown: bỏ qua các sự kiện wake word phụ
+            return;
+        }
+        last_wiggle_us_ = now;
+        xTaskCreate([](void* arg) {
+            auto* self = static_cast<MotorController*>(arg);
+            constexpr uint32_t kStepMs = 50;  // lắc nhanh: 50ms mỗi hướng
+            for (int i = 0; i < 1; ++i) {     // chỉ 1 nhịp trái-phải
+                self->SetMotor(self->left_in1_, self->left_in2_, -1);
+                self->SetMotor(self->right_in1_, self->right_in2_, 1);
+                vTaskDelay(pdMS_TO_TICKS(kStepMs));
+                self->SetMotor(self->left_in1_, self->left_in2_, 1);
+                self->SetMotor(self->right_in1_, self->right_in2_, -1);
+                vTaskDelay(pdMS_TO_TICKS(kStepMs));
+            }
+            self->SetMotor(self->left_in1_, self->left_in2_, 0);
+            self->SetMotor(self->right_in1_, self->right_in2_, 0);
+            self->wiggling_ = false;
+            vTaskDelete(nullptr);
+        }, "motor_wiggle", 2048, this, 5, nullptr);
+    }
+
 private:
     gpio_num_t left_in1_;
     gpio_num_t left_in2_;
@@ -115,6 +165,15 @@ private:
     std::atomic<bool> moving_forward_{false};
     // Cờ chống chồng 2 lần lắc lư (wake word phát hiện liên tiếp)
     std::atomic<bool> wiggling_{false};
+    // Thời điểm lệnh di chuyển gần nhất / bắt đầu phiên chạy (microseconds)
+    int64_t last_command_us_ = 0;
+    int64_t run_start_us_ = 0;
+    // Thời điểm lắc lư gần nhất (microseconds), dùng cho cooldown
+    int64_t last_wiggle_us_ = 0;
+    // Callback thông báo sự kiện cho board (gửi text lên AI)
+    std::function<void(const std::string&)> wake_notifier_;
+    // Chỉ thông báo mép bàn 1 lần cho đến khi có lệnh tiến thành công kế tiếp
+    std::atomic<bool> cliff_notified_{false};
 
     void SetMotor(gpio_num_t in1, gpio_num_t in2, int direction) {
         // direction: 1 = tiến, -1 = lùi, 0 = dừng
@@ -145,6 +204,7 @@ private:
         SetMotor(left_in1_, left_in2_, 1);
         SetMotor(right_in1_, right_in2_, 1);
         moving_forward_ = true;
+        cliff_notified_ = false;  // cho phép thông báo lại nếu lại gặp mép bàn
         ScheduleAutoStop();
     }
 
@@ -188,31 +248,6 @@ private:
         }
     }
 
-    // Phản hồi lắc lư khi nghe thấy wake word. Chạy trong task one-shot riêng
-    // để không block main task (không cản luồng mở audio channel). Giữ
-    // moving_forward_ = false nên không đụng cơ chế chống rơi / auto-stop.
-    void Wiggle() {
-        if (wiggling_.exchange(true)) {
-            return;  // đang lắc, bỏ qua wake word trùng
-        }
-        xTaskCreate([](void* arg) {
-            auto* self = static_cast<MotorController*>(arg);
-            constexpr uint32_t kStepMs = 150;
-            for (int i = 0; i < 2; ++i) {
-                self->SetMotor(self->left_in1_, self->left_in2_, -1);
-                self->SetMotor(self->right_in1_, self->right_in2_, 1);
-                vTaskDelay(pdMS_TO_TICKS(kStepMs));
-                self->SetMotor(self->left_in1_, self->left_in2_, 1);
-                self->SetMotor(self->right_in1_, self->right_in2_, -1);
-                vTaskDelay(pdMS_TO_TICKS(kStepMs));
-            }
-            self->SetMotor(self->left_in1_, self->left_in2_, 0);
-            self->SetMotor(self->right_in1_, self->right_in2_, 0);
-            self->wiggling_ = false;
-            vTaskDelete(nullptr);
-        }, "motor_wiggle", 2048, this, 5, nullptr);
-    }
-
     // Giám sát sàn trong lúc motor đang chạy TIẾN. Task này chỉ đo cảm biến khi
     // moving_forward_ = true; khi đứng yên / lùi / xoay thì không đo gì.
     // Nếu mất sàn giữa chừng -> dừng ngay + lùi một đoạn để không rơi khỏi mép.
@@ -224,13 +259,26 @@ private:
             }
             uint16_t mm = distance_reader_();
             if (mm > kNoFloorMm) {
-                ESP_LOGW("MotorCtrl", "Cliff during move: %d mm, stopping", mm);
+                // Debounce: 1 mẫu vượt ngưỡng có thể là rung/nghiêng khi chạy
+                // (đã gặp thực tế: giữa bàn đọc 55mm trong khi trước đó 0mm).
+                // Cần 2 mẫu liên tiếp mới xác nhận mất sàn.
+                vTaskDelay(pdMS_TO_TICKS(kMonitorPollMs));
+                uint16_t mm2 = distance_reader_();
+                if (mm2 <= kNoFloorMm) {
+                    continue;  // mẫu sau ổn -> báo động giả, bỏ qua
+                }
+                ESP_LOGW("MotorCtrl", "Cliff during move: %d/%d mm, stopping", mm, mm2);
                 Stop();  // moving_forward_ = false -> task ngừng đo tiếp
                 // Lùi lại một đoạn để rời xa mép bàn, tránh rơi
                 SetMotor(left_in1_, left_in2_, -1);
                 SetMotor(right_in1_, right_in2_, -1);
                 vTaskDelay(pdMS_TO_TICKS(kBackOffMs));
                 Stop();
+                // Chủ động báo cho AI (test kênh text tùy ý qua
+                // SendWakeWordDetected). Chỉ gửi 1 lần đến lệnh tiến kế tiếp.
+                if (!cliff_notified_.exchange(true) && wake_notifier_) {
+                    wake_notifier_("Hi LyLy, robot vừa phát hiện mép bàn nên đã dừng lại!");
+                }
             }
         }
     }
@@ -314,6 +362,29 @@ private:
                     throw std::runtime_error("Unknown action: " + action_name +
                         ". Valid actions: forward, backward, left, right, "
                         "forward_until_stop, backward_until_stop, stop");
+                }
+                // Chống chạy dài: LLM đôi khi gửi nhiều lệnh di chuyển nối tiếp
+                // (mỗi lệnh tự auto-stop 1s) làm robot chạy rất lâu. Gộp các
+                // lệnh cách nhau < kRunGapMs thành 1 phiên, quá kMaxRunSessionMs
+                // thì từ chối để robot nghỉ. Lệnh stop reset phiên.
+                if (action != MoveAction::kStop) {
+                    int64_t now = esp_timer_get_time();
+                    if (last_command_us_ != 0 &&
+                        now - last_command_us_ > (int64_t)kRunGapMs * 1000) {
+                        run_start_us_ = now;  // nghỉ đủ lâu -> phiên chạy mới
+                    }
+                    if (run_start_us_ == 0) {
+                        run_start_us_ = now;
+                    }
+                    if (now - run_start_us_ > (int64_t)kMaxRunSessionMs * 1000) {
+                        throw std::runtime_error(
+                            "Robot has been moving continuously for too long. "
+                            "It needs to rest. Wait a moment before asking it to move again");
+                    }
+                    last_command_us_ = now;
+                } else {
+                    run_start_us_ = 0;
+                    last_command_us_ = 0;
                 }
                 // Đo khoảng cách 1 lần trước bất kỳ lệnh di chuyển nào (không đo liên tục).
                 if (action != MoveAction::kStop && distance_reader_) {

@@ -41,9 +41,15 @@
   (Ghi chú trong `docs/websocket.md` mục "Wake Word Detected" với ví dụ
   `"text": "Hi XiaoZhi"`.)
 - → Firmware CÓ THỂ chủ động gửi text bất cứ lúc nào qua kênh này.
-- ⚠️ **CHƯA KIỂM CHỨNG:** server có chấp nhận text tùy ý (không trùng wake word
-  đăng ký) hay không. Cần test thực tế. Nếu server hiểu là wake event rồi vào
-  Listening chờ giọng nói → sau ~10s im lặng nó sẽ TTS "bạn đang bận..." rồi ngủ.
+- ❌ **ĐÃ TEST THỰC TẾ (xong checklist #1): server xiaozhi.me TỪ CHỐI text tùy ý.**
+  Gửi `SendWakeWordDetected("Hi LyLy, robot vừa phát hiện mép bàn...")` trong lúc
+  hội thoại → server trả lỗi: *"Detect is only for wake words, do not send long
+  texts"* (device hiện Alert ERROR + biểu cảm sad). Server chỉ chấp nhận text
+  trùng wake word đã đăng ký ("Hi,Lily" / "Hi,莉莉").
+  → Kênh này chỉ dùng được cho mục đích đánh thức bằng wake word thật.
+  Muốn firmware chủ động gửi nội dung cho LLM: phải tự host server hoặc dùng
+  kênh khác. (Code `Application::SendRobotAlert` + `MotorController::SetWakeNotifier`
+  vẫn giữ, đã tắt gọi trong `compact_wifi_board.cc`, ghi chú lý do tại chỗ.)
 
 ## 3. Cơ chế wake word & vòng lifecycle "thức - ngủ"
 
@@ -85,7 +91,7 @@
 ## 5. Chiến lược đang dùng cho robot (mép bàn / ToF)
 
 - Mỗi lệnh `move`: đo ToF 1 lần trước khi chạy; `forward` bị chặn nếu
-  khoảng cách > `kNoFloorMm` (70mm) → error text → AI cảnh báo.
+  khoảng cách > `kNoFloorMm` (30mm) → error text → AI cảnh báo.
 - Giữ tool call trong lúc động cơ chạy (~1s, auto-stop 1000ms) để AI kịp
   đọc kết quả tại đúng lượt.
 - Sự kiện ngoài lượt tool call (rơi khi đứng yên, pin yếu...) → dùng kênh 2.2
@@ -93,7 +99,17 @@
 
 ## 6. Việc cần làm khi ứng dụng (checklist)
 
-1. Test `SendWakeWordDetected` với text tùy ý trên server đang dùng.
+1. ✅ ~~Test `SendWakeWordDetected` với text tùy ý trên server đang dùng~~
+   — **XONG, KẾT LUẬN: server TỪ CHỐI** ("Detect is only for wake words, do
+   not send long texts"). Xem chi tiết mục 2.2. Tính năng "robot tự bắt chuyện
+   bằng text tùy ý" KHÔNG làm được trên server này → cần tự host server.
 2. Xác nhận timeout tool call thực tế của server (gọi tool chờ ~2-3s xem có OK).
 3. Nếu cần kéo dài/đổi câu chờ im lặng → cân nhắc tự host xiaozhi-esp32-server.
 4. Anti-spam khi kích hoạt AI từ cảm biến (flag chỉ báo cáo 1 lần / cooldown).
+
+## 7. Fact về server xiaozhi.me (quan sát từ trang quản lý)
+
+- Tính cách/vai trò AI chỉnh bằng prompt trực tiếp trên xiaozhi.me — đổi không
+  cần build lại firmware.
+- Có thể hướng dẫn AI gọi tool theo yêu cầu qua system prompt.
+- Giới hạn prompt ~2000 từ (quan sát; chưa xác minh con số chính thức).
