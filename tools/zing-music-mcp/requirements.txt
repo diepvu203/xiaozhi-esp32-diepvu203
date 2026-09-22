@@ -1,0 +1,7 @@
+mcp<2
+yt-dlp
+imageio-ffmpeg
+websockets
+python-dotenv
+fastapi
+uvicorn

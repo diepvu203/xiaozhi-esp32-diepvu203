@@ -151,8 +151,10 @@ void LvglDisplay::SetStatus(const char* status) {
     DisplayLockGuard lock(this);
     if (status_label_ == nullptr) {
         if (setup_ui_called_) {
-            ESP_LOGW(TAG,
-                     "SetStatus('%s') failed: status_label_ is nullptr (SetupUI() was called but "
+            // Expected on boards whose SetupUI() does not create a status bar
+            // (e.g. the compact OLED), so keep it out of the default log level.
+            ESP_LOGD(TAG,
+                     "SetStatus('%s') ignored: status_label_ is nullptr (SetupUI() was called but "
                      "label not created)",
                      status);
         }
@@ -179,10 +181,13 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
     DisplayLockGuard lock(this);
     if (notification_label_ == nullptr) {
         if (setup_ui_called_) {
-            ESP_LOGW(TAG,
-                     "ShowNotification('%s') failed: notification_label_ is nullptr (SetupUI() was "
-                     "called but label not created)",
-                     notification);
+            // Expected on boards whose SetupUI() does not create a notification
+            // bar (e.g. the compact OLED).
+            ESP_LOGD(
+                TAG,
+                "ShowNotification('%s') ignored: notification_label_ is nullptr (SetupUI() was "
+                "called but label not created)",
+                notification);
         }
         return;
     }
@@ -211,10 +216,14 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         // Update icon if mute state changes
         if (codec->output_volume() == 0 && !muted_) {
             muted_ = true;
-            lv_label_set_text(mute_label_, MATERIAL_SYMBOLS_VOLUME_OFF);
+            if (mute_label_ != nullptr) {
+                lv_label_set_text(mute_label_, MATERIAL_SYMBOLS_VOLUME_OFF);
+            }
         } else if (codec->output_volume() > 0 && muted_) {
             muted_ = false;
-            lv_label_set_text(mute_label_, "");
+            if (mute_label_ != nullptr) {
+                lv_label_set_text(mute_label_, "");
+            }
         }
     }
 

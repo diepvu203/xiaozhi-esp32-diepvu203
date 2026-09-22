@@ -1,21 +1,22 @@
-#include "wifi_board.h"
-#include "codecs/no_audio_codec.h"
-#include "display/oled_display.h"
-#include "system_reset.h"
 #include "application.h"
-#include "button.h"
-#include "config.h"
-#include "mcp_server.h"
-#include "lamp_controller.h"
-#include "motor_controller.h"
-#include "tof_sensor.h"
-#include "led/single_led.h"
 #include "assets/lang_config.h"
+#include "button.h"
+#include "codecs/no_audio_codec.h"
+#include "config.h"
+#include "display/oled_display.h"
+#include "lamp_controller.h"
+#include "led/single_led.h"
+#include "mcp_server.h"
+#include "motor_controller.h"
+#include "music_player.h"
+#include "system_reset.h"
+#include "tof_sensor.h"
+#include "wifi_board.h"
 
-#include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_log.h>
 
 #ifdef SH1106
 #include <esp_lcd_panel_sh1106.h>
@@ -41,9 +42,10 @@ private:
             .glitch_ignore_cnt = 7,
             .intr_priority = 0,
             .trans_queue_depth = 0,
-            .flags = {
-                .enable_internal_pullup = 1,
-            },
+            .flags =
+                {
+                    .enable_internal_pullup = 1,
+                },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &display_i2c_bus_));
     }
@@ -94,7 +96,8 @@ private:
         ESP_LOGI(TAG, "Turning display on");
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                   DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
     }
 
     void InitializeButtons() {
@@ -106,12 +109,8 @@ private:
             }
             app.ToggleChatState();
         });
-        touch_button_.OnPressDown([this]() {
-            Application::GetInstance().StartListening();
-        });
-        touch_button_.OnPressUp([this]() {
-            Application::GetInstance().StopListening();
-        });
+        touch_button_.OnPressDown([this]() { Application::GetInstance().StartListening(); });
+        touch_button_.OnPressUp([this]() { Application::GetInstance().StopListening(); });
 
         // GPIO39/40 da chuyen sang cam bien ToF VL53L0X, bo 2 nut am luong
     }
@@ -129,13 +128,39 @@ private:
         static LampController lamp(LAMP_GPIO);
         static TofSensor tof(TOF_I2C_SDA, TOF_I2C_SCL, TOF_XSHUT);
         auto& motor = GetMotor();
+
+        // Nhạc từ Cloud Stream Proxy (server trả URL /stream/<id>.mp3).
+        auto& mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool("self.music.play",
+                           "Play a song from the given MP3 stream URL. The AI must call "
+                           "get_song_url first and pass its stream_url here.",
+                           PropertyList({
+                               Property("url", kPropertyTypeString),
+                               Property("name", kPropertyTypeString, ""),
+                           }),
+                           [](const PropertyList& properties) -> ReturnValue {
+                               std::string url = properties["url"].value<std::string>();
+                               if (!MusicPlayer::GetInstance().Play(url)) {
+                                   throw std::runtime_error("Music is already playing");
+                               }
+                               return true;
+                           });
+        mcp_server.AddTool("self.music.stop", "Stop the currently playing music", PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               MusicPlayer::GetInstance().Stop();
+                               return true;
+                           });
+        mcp_server.AddTool("self.music.get_state", "Check whether music is currently playing",
+                           PropertyList(), [](const PropertyList&) -> ReturnValue {
+                               return MusicPlayer::GetInstance().IsPlaying()
+                                          ? "{\"playing\": true}"
+                                          : "{\"playing\": false}";
+                           });
         if (tof.IsReady()) {
             // ToF KHÔNG đo liên tục. Mỗi lệnh di chuyển sẽ đo 1 lần trước khi chạy
             // (trong MotorController). Reader trả về khoảng cách (mm) xuống sàn.
             TofSensor* tof_ptr = &tof;
-            motor.SetDistanceReader([tof_ptr]() {
-                return tof_ptr->ReadDistanceMm();
-            });
+            motor.SetDistanceReader([tof_ptr]() { return tof_ptr->ReadDistanceMm(); });
             // Phát hiện mép bàn giữa chừng -> chủ động gửi text lên AI.
             // KẾT QUẢ TEST (đã làm trên server xiaozhi.me): server TỪ CHỐI text
             // tùy ý — "Detect is only for wake words, do not send long texts",
@@ -143,7 +168,8 @@ private:
             // callback. Nếu sau này tự host server (cho phép text tùy ý) thì
             // bật lại dòng Application::GetInstance().SendRobotAlert(msg).
             motor.SetWakeNotifier([](const std::string& msg) {
-                ESP_LOGI(TAG, "Wake notifier (disabled, server rejects custom text): %s", msg.c_str());
+                ESP_LOGI(TAG, "Wake notifier (disabled, server rejects custom text): %s",
+                         msg.c_str());
                 // Application::GetInstance().SendRobotAlert(msg);
             });
         } else {
@@ -152,9 +178,7 @@ private:
     }
 
 public:
-    CompactWifiBoard() :
-        boot_button_(BOOT_BUTTON_GPIO),
-        touch_button_(TOUCH_BUTTON_GPIO) {
+    CompactWifiBoard() : boot_button_(BOOT_BUTTON_GPIO), touch_button_(TOUCH_BUTTON_GPIO) {
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
@@ -175,17 +199,18 @@ public:
     virtual AudioCodec* GetAudioCodec() override {
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
         static NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
+                                               AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK,
+                                               AUDIO_I2S_SPK_GPIO_DOUT, AUDIO_I2S_MIC_GPIO_SCK,
+                                               AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
 #else
         static NoAudioCodecDuplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN);
+                                              AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
+                                              AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN);
 #endif
         return &audio_codec;
     }
 
-    virtual Display* GetDisplay() override {
-        return display_;
-    }
+    virtual Display* GetDisplay() override { return display_; }
 };
 
 DECLARE_BOARD(CompactWifiBoard);

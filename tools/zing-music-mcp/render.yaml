@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: xiaozhi-music-mcp
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MCP_ENDPOINT
+        sync: false
+      - key: PUBLIC_BASE
+        sync: false

@@ -2,6 +2,7 @@
 set(SOURCES "audio/audio_codec.cc"
             "audio/audio_debugger.cc"
             "audio/audio_service.cc"
+            "audio/music_player.cc"
             "audio/demuxer/ogg_demuxer.cc"
             "audio/codecs/no_audio_codec.cc"
             "audio/codecs/box_audio_codec.cc"
@@ -1102,6 +1103,7 @@ idf_component_register(SRCS ${SOURCES}
                         app_update
                         spi_flash
                         mbedtls
+                        esp_http_client
                         console
                         efuse
                         bt
