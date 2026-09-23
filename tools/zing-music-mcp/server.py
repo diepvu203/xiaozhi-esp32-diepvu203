@@ -7,16 +7,24 @@ Kiến trúc:
     scrape HTML khi bị anti-bot).
   - MCP tool `get_song_url(title)`: trả NGAY lập tức stream URL công khai
     `<PUBLIC_BASE>/stream/<id>.mp3` (id = md5(title)); không tải gì trước.
-  - FastAPI `GET /stream/{id}.mp3`: lúc robot kết nối thì resolve direct URL
+  - HTTP `GET /stream/{id}.mp3`: lúc robot kết nối thì resolve direct URL
     googlevideo bằng yt-dlp (cache RAM ~30 phút), spawn ffmpeg pipe ra stdout
     và StreamingResponse truyền thẳng xuống HTTP — 0 file tạm trên đĩa.
+    Chuỗi convert: PCM 24 kHz mono (highpass 80 Hz + limiter -1 dBFS) ->
+    MP3 128 kbps (xem AUDIO_* bên dưới để chỉnh mà không cần sửa code).
+
+Server gộp MCP + HTTP stream vào MỘT process (một cổng duy nhất):
+  - MCP streamable-http: endpoint POST /mcp  (mặc định — deploy cloud/Render)
+  - MCP stdio:           MCP_TRANSPORT=stdio (chế độ cũ, chạy qua mcp_pipe.py)
+  - HTTP stream:         GET /stream/{id}.mp3 + GET /health (cùng cổng MCP)
 
 Cấu hình qua biến môi trường:
-  PORT        — cổng HTTP (Render tự set). Mặc định 8619.
-  PUBLIC_BASE — base URL công khai cho stream URL (vd https://xxx.onrender.com).
-                Bỏ trống thì tự dùng http://<IP-LAN>:<PORT> (chạy laptop dev).
+  PORT          — cổng HTTP (Render tự set). Mặc định 8080.
+  MCP_TRANSPORT — streamable-http (mặc định) | stdio
+  PUBLIC_BASE   — base URL công khai cho stream URL (vd https://xxx.onrender.com).
+                  Bỏ trống thì tự dùng http://<IP-LAN>:<PORT> (chạy laptop dev).
 
-Chạy: python server.py  (uvicorn nền + MCP stdio qua mcp_pipe.py)
+Chạy: python server.py
 """
 
 import hashlib
@@ -37,18 +45,106 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from starlette.routing import Mount
+from starlette.responses import JSONResponse, StreamingResponse
+from starlette.requests import Request
 
 from mcp.server.fastmcp import FastMCP
 
-PORT = int(os.environ.get("PORT", "8619"))
+PORT = int(os.environ.get("PORT", "8080"))
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "streamable-http").strip().lower()
+if MCP_TRANSPORT not in ("streamable-http", "stdio"):
+    sys.stderr.write(
+        f"[music] MCP_TRANSPORT='{MCP_TRANSPORT}' không hợp lệ, dùng "
+        "'streamable-http'. Hợp lệ: streamable-http, stdio\n")
+    MCP_TRANSPORT = "streamable-http"
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "").rstrip("/")
 FFMPEG = shutil.which("ffmpeg")  # Dockerfile cài qua apt; dev có imageio fallback
 if not FFMPEG:
     import imageio_ffmpeg
     FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
-mcp = FastMCP("music-server")
+# ---------------------------------------------------------------------------
+# Chuỗi chất lượng âm thanh gửi xuống robot (env-tunable, không cần sửa code).
+#
+# AUDIO_SAMPLE_RATE / AUDIO_CHANNELS phải KHỚP board, để ESP32 không phải
+# resample thêm lần nữa (bread-compact-wifi: AUDIO_OUTPUT_SAMPLE_RATE = 24000,
+# loa mono). Convert 1 lần ở server chất lượng cao luôn tốt hơn để ESP32
+# resample bằng esp_ae_rate_cvt (perf_type SPEED, complexity 2).
+#
+# AUDIO_BITRATE: 96k -> 160k. Ở 24 kHz MP3 là MPEG-2 LSF nên libmp3lame KẸP
+# TRẦN ở 160 kbps (xin 192k cũng chỉ ra 160k) — 160k là mức cao nhất có thể.
+# Lưu ý: bitrate KHÔNG mở rộng được dải tần. Đo thực tế cho thấy 96/128/160k
+# đều bị cắt như nhau từ ~11 kHz trở lên, vì trần đó do sample rate 24 kHz
+# (Nyquist 12 kHz) chứ không do bitrate. Tăng 128k -> 160k chỉ giảm artifact
+# (méo lượng tử, pre-echo), không làm nhạc "sáng" hơn. Băng thông 16 -> 20 KB/s.
+#
+# AUDIO_PRESET: bộ lọc DSP bù trừ loa nhỏ (xem AUDIO_PRESETS). Đây là thứ thay
+# đổi âm sắc nghe được rõ nhất. Đổi preset rồi restart là nghe khác ngay.
+#   speaker (mặc định) - bù trừ loa nhỏ: cắt sub-bass vô ích, nhấn 200 Hz cho
+#                        ấm, giảm 800 Hz bớt "hộp", nhấn 3.2 kHz cho rõ tiếng
+#   flat               - chỉ cắt sub-bass + chống clip, gần như nguyên bản
+#   warm               - nhiều bass hơn (nhấn 200 Hz +6 dB)
+#   bright             - nhiều treble hơn (nhấn 3.5 kHz +4 dB, 10 kHz +3 dB)
+#   loud               - loudnorm (to nhỏ đều giữa các bài) + EQ speaker
+#   none               - không DSP (thô nhất, dễ rè nhất vì bass sâu làm loa rung)
+#
+# AUDIO_FILTERS: chuỗi ffmpeg -af tuỳ ý, ĐÈ preset nếu được set. Đặt "" để tắt
+# hoàn toàn DSP (tương đương AUDIO_PRESET=none).
+# ---------------------------------------------------------------------------
+AUDIO_SAMPLE_RATE = int(os.environ.get("AUDIO_SAMPLE_RATE", "24000"))
+AUDIO_CHANNELS = os.environ.get("AUDIO_CHANNELS", "1")
+AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "160k")
+
+# Bù trừ loa nhỏ dùng chung cho preset `speaker` và `loud`.
+# Đo đáp tuyến thật của chuỗi này (48 kHz stereo -> 24 kHz mono):
+#   50 Hz -12 dB | 90 Hz -2.5 dB | 200 Hz +3.5 dB | 800 Hz -2.5 dB
+#   3.2 kHz +2.5 dB | 10 kHz +1.5 dB | 11 kHz  0 dB
+_SPEAKER_EQ = (
+    "highpass=f=90,"
+    "equalizer=f=200:t=q:w=1.0:g=3.5,"
+    "equalizer=f=800:t=q:w=1.2:g=-2.5,"
+    "equalizer=f=3200:t=q:w=1.4:g=2.5,"
+    "treble=g=1.5:f=10000:w=0.7"
+)
+_SPEAKER_LIMIT = "alimiter=limit=0.841:level=disabled"  # -1.5 dBFS
+
+AUDIO_PRESETS = {
+    "speaker": f"{_SPEAKER_EQ},{_SPEAKER_LIMIT}",
+    "flat": "highpass=f=90,alimiter=limit=0.891:level=disabled",
+    "warm": (
+        "highpass=f=80,"
+        "equalizer=f=200:t=q:w=0.9:g=6,"
+        "equalizer=f=800:t=q:w=1.2:g=-2.5,"
+        "equalizer=f=3200:t=q:w=1.4:g=2.5,"
+        "treble=g=1.5:f=10000:w=0.7,"
+        f"{_SPEAKER_LIMIT}"),
+    "bright": (
+        "highpass=f=100,"
+        "equalizer=f=220:t=q:w=1.0:g=2,"
+        "equalizer=f=800:t=q:w=1.2:g=-3,"
+        "equalizer=f=3500:t=q:w=1.5:g=4,"
+        "treble=g=3:f=10000:w=0.7,"
+        f"{_SPEAKER_LIMIT}"),
+    "loud": f"loudnorm=I=-16:TP=-1.5:LRA=11,{_SPEAKER_EQ},{_SPEAKER_LIMIT}",
+    "none": "",
+}
+
+AUDIO_PRESET = os.environ.get("AUDIO_PRESET", "speaker").strip().lower()
+if AUDIO_PRESET not in AUDIO_PRESETS:
+    sys.stderr.write(
+        f"[music] AUDIO_PRESET='{AUDIO_PRESET}' không hợp lệ, dùng 'speaker'. "
+        f"Hợp lệ: {', '.join(AUDIO_PRESETS)}\n")
+    AUDIO_PRESET = "speaker"
+
+# AUDIO_FILTERS (nếu set) đè preset. Phân biệt "chưa set" và "set rỗng".
+AUDIO_FILTERS = os.environ.get("AUDIO_FILTERS")
+if AUDIO_FILTERS is None:
+    AUDIO_FILTERS = AUDIO_PRESETS[AUDIO_PRESET]
+else:
+    AUDIO_PRESET = "custom(AUDIO_FILTERS)"
+
+mcp = FastMCP("music-server", host="0.0.0.0", port=PORT)
 
 # RAM-only state
 
@@ -192,7 +288,9 @@ def _resolve(key: str, title: str) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "bestaudio[abr<=128]/bestaudio/best",
+        # Ưu tiên nguồn tốt hơn để giảm "generation loss" khi encode lại MP3
+        # (Opus ~160k / AAC 128k tốt hơn hẳn mp3 128k của YouTube).
+        "format": "bestaudio[abr<=192]/bestaudio[abr<=128]/bestaudio/best",
         "default_search": "ytsearch1",
         "noplaylist": True,
     }
@@ -220,17 +318,16 @@ def _resolve(key: str, title: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# FastAPI — Cloud Stream Proxy
+# Unified Server — MCP + HTTP Streaming (gộp chung MỘT Starlette app)
 # ---------------------------------------------------------------------------
-app = FastAPI()
 
-
-@app.get("/health")
-def health():
-    return PlainTextResponse("ok")
+# Các endpoint HTTP stream của FastAPI; được Mount vào Starlette app của MCP
+# ngay bên dưới (mcp._custom_starlette_routes) nên chạy chung một cổng với MCP.
+stream_app = FastAPI()
 
 
 def _ffmpeg_chunks(direct_url: str):
+    # 1 lần convert duy nhất: nguồn -> PCM (swr + filter DSP) -> MP3 160 kbps.
     cmd = [
         FFMPEG, "-hide_banner", "-loglevel", "warning",
         "-reconnect", "1",
@@ -239,12 +336,16 @@ def _ffmpeg_chunks(direct_url: str):
         "-reconnect_delay_max", "5",
         "-i", direct_url,
         "-vn",
-        "-ac", "1",
-        "-ar", "24000",
+        "-ac", AUDIO_CHANNELS,
+        "-ar", str(AUDIO_SAMPLE_RATE),
+    ]
+    if AUDIO_FILTERS:
+        cmd += ["-af", AUDIO_FILTERS]
+    cmd += [
         "-codec:a", "libmp3lame",
-        "-b:a", "96k",
+        "-b:a", AUDIO_BITRATE,
         "-f", "mp3",
-        "pipe:1"
+        "pipe:1",
     ]
     proc = subprocess.Popen(
         cmd,
@@ -263,7 +364,7 @@ def _ffmpeg_chunks(direct_url: str):
             pass
 
 
-@app.get("/stream/{key}.mp3")
+@stream_app.get("/stream/{key}.mp3")
 def stream(key: str):
     with _lock:
         title = _titles.get(key)
@@ -278,6 +379,30 @@ def stream(key: str):
                              headers={"Content-Type": "audio/mpeg"})
 
 
+# /health ở ROOT cho Render healthCheckPath — đăng ký qua custom_route nên
+# không cần auth; FastAPI không có route này (Mount đặt SAU nên custom_route
+# được match trước).
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({
+        "ok": True,
+        "audio": {
+            "sample_rate": AUDIO_SAMPLE_RATE,
+            "channels": AUDIO_CHANNELS,
+            "bitrate": AUDIO_BITRATE,
+            "preset": AUDIO_PRESET,
+            "filters": AUDIO_FILTERS,
+            "presets_available": sorted(AUDIO_PRESETS),
+        },
+    })
+
+
+# Mount TOÀN BỘ routes của stream_app (/stream/...) vào app MCP tại root:
+# thứ tự quan trọng — FastMCP đặt /mcp trước custom routes, nên request /mcp luôn
+# vào MCP, /health vào custom_route, các path còn lại rơi vào stream_app.
+mcp._custom_starlette_routes.append(Mount("/", app=stream_app))
+
+
 # ---------------------------------------------------------------------------
 # Global state (phải định nghĩa TRƯỚC mcp.run() để tránh NameError)
 # ---------------------------------------------------------------------------
@@ -288,9 +413,12 @@ _RESOLVE_TTL = 30 * 60  # direct URL googlevideo dùng lại tối đa 30 phút
 
 
 def _run_http():
+    """Chỉ dùng ở MCP_TRANSPORT=stdio: chạy HTTP stream (cùng Starlette app
+    với MCP — gồm /mcp + /health + /stream/...) trên cổng PORT ở chế độ nền."""
     import uvicorn
     try:
-        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
+        uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=PORT,
+                    log_level="warning")
     except Exception as e:
         sys.stderr.write(f"[music] FATAL HTTP server error on port {PORT}: {e}\n")
         sys.stderr.flush()
@@ -334,7 +462,18 @@ if __name__ == "__main__":
         q = " ".join(sys.argv[2:])
         print(json.dumps(_search_youtube(q, 3), ensure_ascii=False, indent=2))
     else:
-        threading.Thread(target=_run_http, daemon=True).start()
-        sys.stdout.write(f"[music] HTTP/Stream API on :{PORT} (base={PUBLIC_BASE or 'auto-LAN'})\n")
+        sys.stdout.write(
+            f"[music] transport={MCP_TRANSPORT} port={PORT} "
+            f"(base={PUBLIC_BASE or 'auto-LAN'})\n")
+        sys.stdout.write(
+            f"[music] audio: {AUDIO_SAMPLE_RATE} Hz x{AUDIO_CHANNELS}, "
+            f"{AUDIO_BITRATE} mp3, preset={AUDIO_PRESET}\n")
+        sys.stdout.write(f"[music] filters: {AUDIO_FILTERS or '(none)'}\n")
         sys.stdout.flush()
-        mcp.run()
+        if MCP_TRANSPORT == "stdio":
+            # Chế độ cũ: MCP stdio (qua mcp_pipe.py) + HTTP stream chạy nền.
+            threading.Thread(target=_run_http, daemon=True).start()
+            mcp.run()
+        else:
+            # Chế độ cloud: MCP streamable-http + HTTP stream CÙNG một uvicorn.
+            mcp.run(transport="streamable-http")

@@ -3,8 +3,7 @@ services:
     name: xiaozhi-music-mcp
     runtime: docker
     plan: free
-    # Khi push RIENG thu muc nay lam repo: Dockerfile + render.yaml nam cung
-    # nhau o goc repo do (Dockerfile COPY requirements.txt/server.py cung thu muc).
+    # Build tu repo root: Dockerfile o goc copy tools/zing-music-mcp/*.
     dockerfilePath: ./Dockerfile
     context: .
     healthCheckPath: /health

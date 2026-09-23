@@ -1,7 +1,9 @@
 # MCP Server Nhạc Việt cho Xe Robot XiaoZhi — Cloud Stream Proxy
 
 Server MCP tìm nhạc trên **YouTube** (qua `yt-dlp`) và phục vụ **stream MP3
-128kbps on-the-fly qua HTTP** (FastAPI `StreamingResponse` + ffmpeg pipe).
+on-the-fly qua HTTP** (FastAPI `StreamingResponse` + ffmpeg pipe), gộp cùng
+MCP server (`search_song`, `get_song_url`) trong **một process, một cổng**
+(`/mcp` streamable-http + `/stream/<id>.mp3` + `/health`).
 **100% RAM, không ghi file tạm ra đĩa.** Robot chỉ nhận 1 URL stream duy nhất
 và tự stream qua WiFi của nó.
 
@@ -13,16 +15,65 @@ và tự stream qua WiFi của nó.
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
 
 Cơ chế: khi robot (hoặc VLC) mở `/stream/<id>.mp3`, server resolve direct URL
-googlevideo bằng yt-dlp (cache RAM ~30 phút) rồi pipe `ffmpeg -b:a 128k` thẳng
-ra HTTP response.
+googlevideo bằng yt-dlp (cache RAM ~30 phút) rồi pipe `ffmpeg` (mặc định
+CBR 160k, xem `AUDIO_BITRATE`) thẳng ra HTTP response.
 
 ## Cấu hình (biến môi trường)
 
 | Biến | Ý nghĩa |
 |---|---|
-| `PORT` | Cổng HTTP. Mặc định 8619 (Render tự set) |
+| `PORT` | Cổng HTTP. Mặc định 8080 (Render tự set) |
+| `MCP_TRANSPORT` | `streamable-http` (mặc định) — MCP + stream chung 1 cổng, deploy cloud. `stdio` — chạy MCP qua `mcp_pipe.py` (mặc định của `run.bat`) |
 | `PUBLIC_BASE` | Base URL công khai, vd `https://xiaozhi-music.onrender.com`. Bỏ trống khi chạy laptop → tự dùng `http://<IP-LAN>:<PORT>` |
 | `MCP_ENDPOINT` | URL "Điểm cuối MCP" từ xiaozhi.me (cho `mcp_pipe.py`) |
+| `AUDIO_SAMPLE_RATE` | Rate gửi xuống robot. Mặc định `24000` — phải khớp `AUDIO_OUTPUT_SAMPLE_RATE` của board để ESP32 không resample thêm |
+| `AUDIO_CHANNELS` | Số kênh. Mặc định `1` (loa robot là mono) |
+| `AUDIO_PRESET` | Bộ lọc DSP bù trừ loa. Mặc định `speaker`. Xem bảng dưới |
+| `AUDIO_BITRATE` | Bitrate MP3. Mặc định `160k` — mức cao nhất libmp3lame cho phép ở 24 kHz (MPEG-2 LSF) |
+| `AUDIO_FILTERS` | Chuỗi `ffmpeg -af` tuỳ ý, **đè** preset khi được set. `""` = tắt DSP |
+
+Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi khởi động để bạn biết cấu hình đang chạy.
+
+### Chất lượng âm thanh
+
+Thứ tự ảnh hưởng thực tế: **âm sắc (EQ) > méo/clip > bitrate**. Trần cứng: 24 kHz → Nyquist 12 kHz, và loa nhỏ trên board không tái tạo được sub-bass.
+
+**Preset (`AUDIO_PRESET`)** — đổi preset rồi restart là nghe khác ngay, nên cứ thử A/B:
+
+| Preset | Đặc điểm | Đáp tuyến đo được (48 kHz → 24 kHz mono) |
+|---|---|---|
+| `speaker` (mặc định) | Bù trừ loa nhỏ: cắt sub-bass, ấm hơn, bớt "hộp", rõ tiếng | 50 Hz −12 · 90 Hz −2.5 · 200 Hz **+3.5** · 800 Hz −2.5 · 3.2 kHz **+2.5** · 10 kHz +1.5 |
+| `flat` | Gần như nguyên bản, chỉ cắt sub-bass + chống clip | 90 Hz −3 · còn lại ~0 |
+| `warm` | Bass nhiều hơn (nhấn 200 Hz +6 dB) | 200 Hz **+5.8** |
+| `bright` | Treble nhiều hơn (3.5 kHz +4, 10 kHz +3) | 3.5 kHz **+3.5** · 10 kHz **+1.7** |
+| `loud` | To/nhỏ đều giữa các bài (`loudnorm`) + EQ `speaker` | như `speaker`, mức to được chuẩn hoá |
+| `none` | Không DSP. Thô nhất và **dễ rè nhất** (bass sâu làm màng loa rung) | 0 dB toàn dải |
+
+Preset nào cũng kết thúc bằng `alimiter=limit=0.841` (−1.5 dBFS) để PCM sau khi giải mã không bị clip khi nhân software volume trong firmware.
+
+**Bitrate (`AUDIO_BITRATE`)** — 128k → 160k. Đo lại trên tín hiệu nhạc tổng hợp 20 s @24 kHz (SNR so với PCM gốc):
+
+| Cấu hình | Bitrate thực | SNR |
+|---|---|---|
+| CBR 128k | 129k | 18.5 dB |
+| **CBR 160k** | **161k** | **18.6 dB** |
+| VBR `-q:a 0` (V0) | 73k | 15.6 dB |
+| VBR `-q:a 2` (V2) | 55k | 13.3 dB |
+| CBR 160k + `-cutoff 11000` | 161k | 16.9 dB (tệ hơn) |
+
+→ Giữ **CBR 160k**, không dùng VBR (VBR ở container này tụt xuống 55–73 kbps), không set `-cutoff`. 160k là **trần** của libmp3lame ở 24 kHz: xin `192k` cũng chỉ ra 160k. Băng thông 20 KB/s (robot pre-buffer 4 s ≈ 80 KB).
+
+**Board 16 kHz** (ESP32-S3 SuperMini...) → `AUDIO_SAMPLE_RATE=16000` + `AUDIO_BITRATE=64k`.
+
+### Ví dụ chỉnh
+
+| Muốn gì | Cách làm |
+|---|---|
+| Sáng/thoáng hơn | `AUDIO_PRESET=bright` |
+| Bass nhiều hơn | `AUDIO_PRESET=warm` |
+| Nghe thử bản "nguyên bản" | `AUDIO_PRESET=flat` |
+| Tự chỉnh EQ | `AUDIO_FILTERS=highpass=f=90,equalizer=f=250:t=q:w=1:g=5,alimiter=limit=0.841:level=disabled` |
+| Tắt hết DSP | `AUDIO_PRESET=none` hoặc `AUDIO_FILTERS=` |
 
 ## Cài đặt (laptop dev, 1 lần)
 
@@ -32,29 +83,39 @@ pip install -r requirements.txt
 
 ## Chạy trên laptop (dev)
 
-Double-click `run.bat` (đã dán MCP_ENDPOINT vào trong) hoặc:
+Double-click `run.bat` (đã dán MCP_ENDPOINT vào trong; `run.bat` tự set
+`MCP_TRANSPORT=stdio`) hoặc:
 
 ```powershell
 cd d:\xiaozhi\xiaozhi-esp32-diepvu203\tools\zing-music-mcp
 $env:MCP_ENDPOINT = "<URL Điểm cuối MCP>"
+$env:MCP_TRANSPORT = "stdio"   # MCP stdio qua mcp_pipe; HTTP stream chạy nền
 python mcp_pipe.py server.py
 ```
 
 - Web xiaozhi.me hiện **Đã kết nối** + 2 tool là OK.
-- Windows Firewall lần đầu hỏi **Allow** cho Python port 8619 (Private).
+- Windows Firewall lần đầu hỏi **Allow** cho Python port 8080 (Private).
 
 ## Deploy lên Render.com (server 24/7, robot chạy WiFi nào cũng hát được)
 
-1. Push thư mục này lên 1 repo GitHub (dùng `Dockerfile` + `render.yaml` sẵn có).
-2. Render → New → Blueprint → chọn repo. Hoặc New Web Service → Docker.
-3. Environment variables:
-   - `MCP_ENDPOINT` = URL Điểm cuối MCP từ xiaozhi.me
+Server gộp MCP + stream vào **một cổng**: `POST /mcp` (streamable-http),
+`GET /health`, `GET /stream/<id>.mp3` — không cần `mcp_pipe.py` trên cloud.
+
+1. Push cả repo lên GitHub. Có 2 cách:
+   - **Blueprint (khuyến nghị):** Render → New → Blueprint → chọn repo
+     (dùng `render.yaml` ở **gốc repo**, trỏ `./Dockerfile` gốc).
+   - **Web Service:** New Web Service → Docker → dùng `Dockerfile` ở gốc repo
+     (COPY `tools/zing-music-mcp/*`). cũng được.
+2. Environment variables:
+   - `MCP_TRANSPORT` = `streamable-http` (mặc định, `render.yaml` đã set)
    - `PUBLIC_BASE` = `https://<tên-service>.onrender.com`
-4. Deploy. Lưu ý gói **free sẽ ngủ sau ~15 phút không traffic** (MCP tự nối
-   lại nhờ reconnect của `mcp_pipe`, lần mở stream đầu mất thêm ~30-50 giây);
-   chạy ổn định thì dùng gói Starter (~$7/tháng). HuggingFace Spaces chạy
-   được cùng Dockerfile (port 8619 trong Dockerfile, HF dùng 7860 — đổi
-   `EXPOSE`/`PORT` khi cần).
+   - (tùy chọn) `MCP_ENDPOINT` chỉ cần khi chạy mode `stdio` qua `mcp_pipe.py`
+3. Deploy. Health check tự động qua `/health`. Lưu ý gói **free sẽ ngủ sau
+   ~15 phút không traffic** (lần gọi MCP/stream đầu mất thêm ~30-50 giây);
+   chạy ổn định thì dùng gói Starter (~$7/tháng).
+4. Client MCP (xiaozhi.me hoặc client hỗ trợ streamable-http) trỏ endpoint
+   `https://<tên-service>.onrender.com/mcp` — nếu client chỉ nhận WSS
+   (Điểm cuối MCP dạng `wss://...` thì vẫn chạy `run.bat` local như trên).
 5. Lưu ý: YouTube có thể gắt hơn với IP datacenter — nếu resolve bị chặn
    thì nạp cookies Google vào yt-dlp (`cookiesfrombrowser`).
 
@@ -70,15 +131,21 @@ Nếu lỗi thì báo tôi. Không tự phát nhạc khác khi tôi không yêu 
 ## Kiến trúc & giới hạn
 
 ```
-Robot (mọi WiFi có Internet) ──stream──▶ /stream/<id>.mp3 (FastAPI + ffmpeg)
-        ▲                                        ▲
-        │ self.music.play(url)          resolve yt-dlp (cache RAM)
-        │                                        │
-MCP: xiaozhi.me ◀──wss── mcp_pipe.py ──stdio── server.py
+MODE 1 — Cloud (Render, MCP_TRANSPORT=streamable-http, 1 cổng, 1 process):
+
+  Client MCP ──POST /mcp──▶   ┐
+  Robot ──GET /stream/...──▶  ├─ server.py (uvicorn: /mcp + /health + /stream)
+  Render ──GET /health──▶     ┘        │
+                                       └─ yt-dlp resolve (RAM cache) → ffmpeg pipe
+
+MODE 2 — Local dev (MCP_TRANSPORT=stdio, run.bat):
+
+  MCP: xiaozhi.me ◀──wss── mcp_pipe.py ──stdio── server.py
+  Robot ──stream──▶ /stream/<id>.mp3 (HTTP thread nền, cùng process)
 ```
 
 - **Đã test**: `/health` OK; `/stream/b866437922.mp3` trả MP3 hợp lệ
-  (5:00.53, 128kbps, 48kHz stereo, 4.8MB) — convert on-the-fly, 0 file đĩa.
+  (5:00.53, 160kbps, 48kHz stereo) — convert on-the-fly, 0 file đĩa.
 - Direct URL googlevideo bị khóa theo IP + hết hạn → luôn stream qua server
   (IP của server quyết định); không trả direct URL cho robot.
 
