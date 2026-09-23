@@ -15,6 +15,14 @@
 #define AUDIO_CODEC_DMA_DESC_NUM 6
 #define AUDIO_CODEC_DMA_FRAME_NUM 240
 
+// The DMA ring is dma_desc_num * dma_frame_num frames = 1440 frames = 60 ms at
+// 24 kHz. When the ring runs dry the I2S peripheral repeats the last DMA buffer
+// and the resulting click is audible, so a well-tuned output path needs more
+// headroom than 60 ms: a single WiFi/TLS burst or flash write can exceed that.
+// (48 kHz targets get the same ms with fewer frames.)
+#define AUDIO_CODEC_DMA_DESC_NUM_LARGE 8
+#define AUDIO_CODEC_DMA_FRAME_NUM_LARGE 512
+
 // ESP-IDF 6 removed i2s_port_t and changed i2s_chan_config_t::id to an integer.
 // Keep numeric I2S controller IDs usable on targets where IDF 5 does not expose
 // every value through the target-specific i2s_port_t enum (for example ESP32-C3).

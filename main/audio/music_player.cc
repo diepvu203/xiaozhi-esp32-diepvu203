@@ -19,11 +19,15 @@
 
 #define TAG "MusicPlayer"
 
-// Same macro audio_service.cc uses (rate converter config).
+// Same macro audio_service.cc uses (rate converter config), except for
+// `complexity`: on the music path the resampler only exists as a fallback (the
+// stream rate differs from the codec output rate, which the server avoids on
+// purpose), so it is worth paying CPU for complexity 3 = best resampling
+// quality. Complexity 2 (speech default) trades quality for speed.
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
     (esp_ae_rate_cvt_cfg_t) {                                                                \
         .src_rate = (uint32_t)(_src_rate), .dest_rate = (uint32_t)(_dest_rate),              \
-        .channel = (uint8_t)(_channel), .bits_per_sample = ESP_AUDIO_BIT16, .complexity = 2, \
+        .channel = (uint8_t)(_channel), .bits_per_sample = ESP_AUDIO_BIT16, .complexity = 3, \
         .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,                                        \
     }
 
@@ -196,9 +200,9 @@ void MusicPlayer::StreamTask(std::string url) {
         }
 
         if (!will_retry) {
-            // Pre-buffer ~48 KB (~4 s @96 kbps) before decoding/playing so a
-            // laggy WiFi link does not cause stutter.
-            constexpr size_t kPreBufferBytes = 48 * 1024;
+            // Pre-buffer the whole read buffer (~4 s @128 kbps) before
+            // decoding/playing so a laggy WiFi link does not cause stutter.
+            constexpr size_t kPreBufferBytes = kReadBufferBytes;
             while (!stop_requested_.load() && !eos && buffered < kPreBufferBytes) {
                 int plen =
                     esp_http_client_read(client, reinterpret_cast<char*>(inbuf.data()) + buffered,

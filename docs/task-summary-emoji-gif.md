@@ -853,3 +853,26 @@ etwork_label_: condition check (network_label_ != nullptr && ...) trước khi g
   - Log `stats: buffered` sẽ duy trì ở mức cao (~50.000 - 64.000 B thay vì 116 B).
   - Không còn hiện tượng giật giật hay rớt socket `Software caused connection abort`.
 
+### 15. Nâng chất lượng âm thanh nhạc (23/09/2026)
+
+**Vấn đề**: Nhạc phát ra loa nghe rè/méo, kém rõ rệt so với bài hát gốc (trong khi giọng TTS nghe bình thường).
+
+**Nguyên nhân & cách sửa — server `tools/zing-music-mcp/server.py`:**
+
+1. **Bitrate MP3 quá thấp**: 96 kbps ở 24 kHz mono = 4 bit/mẫu (MP3 ở 24 kHz là MPEG-2 LSF, codec phải làm việc ở chế độ "tiết kiệm" → artifact rè/swishy khi nhạc nhiều nhạc cụ). → **128 kbps** (5.33 bit/mẫu). Băng thông chỉ tăng 12 → 16 KB/s.
+2. **Chất lượng nguồn (generation loss)**: yt-dlp trước đây lọc `bestaudio[abr<=128]` nên lấy bản 128k của YouTube (thường là Opus/AAC 128k) rồi encode lại sang MP3 → mất chất lượng 2 lần. → `bestaudio[abr<=192]/bestaudio[abr<=128]/bestaudio/best` để ưu tiên bản nguồn tốt hơn, giảm nhiễu lượng tử khi encode lại.
+3. **Sub-bass làm méo loa nhỏ**: loa robot không tái tạo được dưới 80 Hz; năng lượng bass sâu chỉ làm màng loa rung mạnh → méo cả dải giữa (nghe "rè" rõ nhất ở đoạn có trống/bass). → `highpass=f=80`.
+4. **Clip sau giải mã**: PCM đỉnh 0 dBFS khi nhân với software volume trong `NoAudioCodec::Write` (`pow(volume/100, 2)`) và amp I2S dễ vượt biên → clip cứng nghe như rè. → `alimiter=limit=0.891` giữ đỉnh -1 dBFS.
+5. **Sample rate mismatch**: server fix cứng `-ar 24000` nên board nào có `AUDIO_OUTPUT_SAMPLE_RATE` khác (vd 16 kHz) sẽ bị ESP32 resample bằng `esp_ae_rate_cvt` (complexity 2, perf_type SPEED) — chất lượng thấp hơn resample ở server. → Sample rate / channels / bitrate / filter giờ là **biến môi trường**: `AUDIO_SAMPLE_RATE`, `AUDIO_CHANNELS`, `AUDIO_BITRATE`, `AUDIO_FILTERS` (mặc định đã khớp `bread-compact-wifi`: 24000 Hz, mono).
+6. **Log cấu hình**: khi khởi động server in `[music] audio: 24000 Hz x1, 128k mp3, filters='...'` để biết ngay cấu hình đang chạy.
+
+**Firmware `main/audio/music_player.cc`**: pre-buffer cứng 48 KB → `kReadBufferBytes` (64 KB ≈ 4 s @128 kbps) để giữ nguyên cửa sổ chống giật khi băng thông tăng 33%.
+
+**Kiểm chứng đã chạy**:
+- Bơm thật qua endpoint `/stream/{id}.mp3` (uvicorn + ffmpeg): file nhận được là `24000 Hz, mono, 128 kb/s` MP3.
+- `ffmpeg volumedetect`: `highpass=f=80` giảm tone 40 Hz **12.3 dB** (bỏ sub-bass loa không phát được) nhưng giữ nguyên tone 440 Hz; `alimiter` giữ đỉnh đúng **-1.0 dBFS** kể cả khi boost +24 dB, còn không limiter thì chạm 0.0 dBFS (clip).
+- Test env override: `AUDIO_SAMPLE_RATE=16000 AUDIO_CHANNELS=2 AUDIO_BITRATE=64k AUDIO_FILTERS=""` → lệnh ffmpeg đổi đúng (`-ar 16000 -ac 2 -b:a 64k`, không còn `-af`).
+
+**Cần làm**: restart `run.bat` (hoặc redeploy Render) để nạp `server.py` mới; muốn sạch hơn nữa đặt `AUDIO_BITRATE=160k`, muốn nhiều bass hơn đặt `AUDIO_FILTERS=highpass=f=50,alimiter=limit=0.891:level=disabled` hoặc `AUDIO_FILTERS=""`.
+
+

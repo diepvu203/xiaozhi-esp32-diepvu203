@@ -24,8 +24,8 @@ NoAudioCodecDuplex::NoAudioCodecDuplex(int input_sample_rate, int output_sample_
     i2s_chan_config_t chan_cfg = {
         .id = XIAOZHI_I2S_PORT(0),
         .role = I2S_ROLE_MASTER,
-        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
-        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
+        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM_LARGE,
+        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM_LARGE,
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
         .intr_priority = 0,
@@ -85,8 +85,8 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     i2s_chan_config_t chan_cfg = {
         .id = XIAOZHI_I2S_PORT(0),
         .role = I2S_ROLE_MASTER,
-        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
-        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
+        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM_LARGE,
+        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM_LARGE,
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
         .intr_priority = 0,
@@ -154,8 +154,8 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     i2s_chan_config_t chan_cfg = {
         .id = XIAOZHI_I2S_PORT(0),
         .role = I2S_ROLE_MASTER,
-        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
-        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
+        .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM_LARGE,
+        .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM_LARGE,
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
         .intr_priority = 0,
@@ -217,7 +217,17 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
 
 int NoAudioCodec::Write(const int16_t* data, int samples) {
     std::lock_guard<std::mutex> lock(data_if_mutex_);
-    std::vector<int32_t> buffer(samples);
+
+    // Reuse the member scratch buffer instead of allocating a fresh vector on
+    // every call. The audio output task calls this ~90 times/second while music
+    // plays; a heap alloc/free per call (with the I2S mutex held) lets the
+    // WiFi/TLS tasks delay the I2S write, which shows up as dropouts. The
+    // buffer only grows to the largest chunk seen, so a steady stream performs
+    // no heap operations here at all.
+    if (write_scratch_.size() < static_cast<size_t>(samples)) {
+        write_scratch_.resize(samples);
+    }
+    int32_t* buffer = write_scratch_.data();
 
     // output_volume_: 0-100
     // volume_factor_: 0-65536
@@ -234,7 +244,7 @@ int NoAudioCodec::Write(const int16_t* data, int samples) {
     }
 
     size_t bytes_written;
-    ESP_ERROR_CHECK(i2s_channel_write(tx_handle_, buffer.data(), samples * sizeof(int32_t), &bytes_written, portMAX_DELAY));
+    ESP_ERROR_CHECK(i2s_channel_write(tx_handle_, buffer, samples * sizeof(int32_t), &bytes_written, portMAX_DELAY));
     return bytes_written / sizeof(int32_t);
 }
 
@@ -242,8 +252,16 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
     size_t bytes_read;
     constexpr uint32_t kReadTimeoutMs = 200;
 
-    std::vector<int32_t> bit32_buffer(samples);
-    if (i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, kReadTimeoutMs) != ESP_OK) {
+    // Same reasoning as Write() above: reuse a member scratch buffer so mic
+    // capture stays off the heap. The mic keeps running while music plays, so a
+    // per-call allocation here would contend with the MP3 decoder and the WiFi
+    // tasks at exactly the moment the output path needs the CPU most.
+    std::lock_guard<std::mutex> lock(read_if_mutex_);
+    if (read_scratch_.size() < static_cast<size_t>(samples)) {
+        read_scratch_.resize(samples);
+    }
+    int32_t* bit32_buffer = read_scratch_.data();
+    if (i2s_channel_read(rx_handle_, bit32_buffer, samples * sizeof(int32_t), &bytes_read, kReadTimeoutMs) != ESP_OK) {
         return 0;
     }
 
@@ -294,8 +312,8 @@ NoAudioCodecSimplexPdm::NoAudioCodecSimplexPdm(int input_sample_rate, int output
 
     // Create a new channel for speaker
     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(XIAOZHI_I2S_PORT(1), I2S_ROLE_MASTER);
-    tx_chan_cfg.dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM;
-    tx_chan_cfg.dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM;
+    tx_chan_cfg.dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM_LARGE;
+    tx_chan_cfg.dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM_LARGE;
     tx_chan_cfg.auto_clear_after_cb = true;
     tx_chan_cfg.auto_clear_before_cb = false;
     tx_chan_cfg.intr_priority = 0;
