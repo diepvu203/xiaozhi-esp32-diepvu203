@@ -70,6 +70,13 @@ if not FFMPEG:
     import imageio_ffmpeg
     FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
+# Chẩn đoán môi trường (stderr — an toàn với MCP stdio, hiện trong log Render):
+# deno là JS runtime cho yt-dlp; thiếu nó YouTube drop formats -> lỗi
+# "Requested format is not available".
+sys.stderr.write(
+    f"[music] yt-dlp={yt_dlp.version.__version__}, "
+    f"deno={shutil.which('deno') or 'NOT FOUND'}\n")
+
 # ---------------------------------------------------------------------------
 # Chuỗi chất lượng âm thanh gửi xuống robot (env-tunable, không cần sửa code).
 #
@@ -360,15 +367,61 @@ def _resolve(key: str, title: str) -> dict:
                 raise  # lỗi khác (bot-check, unavailable...) -> nổi lên ngay
             last_err = e
     if info is None:
-        raise RuntimeError(
-            f"không lấy được format nào cho '{title}': {last_err}")
+        # Chẩn đoán (stderr): extract KHÔNG selector để đếm formats;
+        # no_warnings=False để lộ cảnh báo EJS/JS-runtime thường bị ẩn.
+        diag_opts = dict(base_opts)
+        diag_opts["no_warnings"] = False
+        _apply_ydl_auth(diag_opts)
+        n_formats = -1
+        diag = None
+        try:
+            with yt_dlp.YoutubeDL(diag_opts) as ydl:
+                diag = ydl.extract_info(title, download=False)
+            n_formats = len(diag.get("formats") or [])
+        except Exception as de:  # noqa: BLE001 - chẩn đoán
+            sys.stderr.write(f"[music] diag extract: {de}\n")
+        sys.stderr.write(
+            f"[music] resolve fail '{title}': formats={n_formats}, "
+            f"deno={shutil.which('deno') or 'NOT FOUND'}, "
+            f"yt-dlp={yt_dlp.version.__version__}\n")
+        if diag is not None and n_formats > 0:
+            # Plain extract có formats (selector ảo là thủ phạm) -> dùng luôn.
+            info = diag
+        else:
+            # Fallback: player_client không cần web-sig/PO-token — đặc trị
+            # formats=[] khi cookies + IP datacenter khiến web client bị strip.
+            cli_opts = dict(base_opts)
+            cli_opts["format"] = "bestaudio/best"
+            cli_opts["extractor_args"] = {
+                "youtube": {"player_client": ["android", "ios", "tv"]}}
+            _apply_ydl_auth(cli_opts)
+            try:
+                with yt_dlp.YoutubeDL(cli_opts) as ydl:
+                    info = ydl.extract_info(title, download=False)
+                sys.stderr.write(
+                    "[music] resolved via player_client=android,ios,tv\n")
+            except yt_dlp.utils.DownloadError as e:
+                last_err = e
+        if info is None:
+            raise RuntimeError(
+                f"không lấy được format nào cho '{title}' "
+                f"(formats={n_formats}, "
+                f"deno={'yes' if shutil.which('deno') else 'NO'}): {last_err}")
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
     if not direct:
-        fmts = [f for f in (chosen.get("formats") or []) if f.get("url")]
-        if not fmts:
+        with_url = [f for f in (chosen.get("formats") or []) if f.get("url")]
+        # Ưu tiên audio-only: fmts[-1] là cao nhất nhưng có thể là VIDEO-only
+        # (âm thanh im lặng) — chỉ lấy video khi không còn format âm thanh nào.
+        audio_only = [
+            f for f in with_url
+            if f.get("vcodec") in (None, "none")
+            and f.get("acodec") not in (None, "none")]
+        pick = audio_only[-1] if audio_only else (
+            with_url[-1] if with_url else None)
+        if pick is None:
             raise RuntimeError("không lấy được direct stream URL")
-        direct = fmts[-1]["url"]
+        direct = pick["url"]
     entry = {
         "direct_url": direct,
         "title": chosen.get("title") or title,
