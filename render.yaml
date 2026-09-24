@@ -5,7 +5,7 @@ services:
     plan: free
     # Build tu repo root: Dockerfile o goc copy tools/zing-music-mcp/*.
     dockerfilePath: ./Dockerfile
-    context: .
+    dockerContext: .
     healthCheckPath: /health
     envVars:
       - key: PUBLIC_BASE

@@ -6,7 +6,7 @@ services:
     # Khi push RIENG thu muc nay lam repo: Dockerfile + render.yaml nam cung
     # nhau o goc repo do (Dockerfile COPY requirements.txt/server.py cung thu muc).
     dockerfilePath: ./Dockerfile
-    context: .
+    dockerContext: .
     healthCheckPath: /health
     envVars:
       - key: PUBLIC_BASE
