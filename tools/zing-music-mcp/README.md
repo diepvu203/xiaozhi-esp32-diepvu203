@@ -23,7 +23,7 @@ CBR 160k, xem `AUDIO_BITRATE`) thẳng ra HTTP response.
 | Biến | Ý nghĩa |
 |---|---|
 | `PORT` | Cổng HTTP. Mặc định 8080 (Render tự set) |
-| `MCP_TRANSPORT` | `streamable-http` (mặc định) — MCP + stream chung 1 cổng, deploy cloud. `stdio` — chạy MCP qua `mcp_pipe.py` (mặc định của `run.bat`) |
+| `MCP_TRANSPORT` | `stdio` — chạy qua `mcp_pipe.py` kết nối `MCP_ENDPOINT` (run.bat và Render đều dùng). `streamable-http` — serve `POST /mcp` trực tiếp (mặc định trong server.py nếu không set) |
 | `PUBLIC_BASE` | Base URL công khai, vd `https://xiaozhi-music.onrender.com`. Bỏ trống khi chạy laptop → tự dùng `http://<IP-LAN>:<PORT>` |
 | `MCP_ENDPOINT` | URL "Điểm cuối MCP" từ xiaozhi.me (cho `mcp_pipe.py`) |
 | `AUDIO_SAMPLE_RATE` | Rate gửi xuống robot. Mặc định `24000` — phải khớp `AUDIO_OUTPUT_SAMPLE_RATE` của board để ESP32 không resample thêm |
@@ -98,26 +98,29 @@ python mcp_pipe.py server.py
 
 ## Deploy lên Render.com (server 24/7, robot chạy WiFi nào cũng hát được)
 
-Server gộp MCP + stream vào **một cổng**: `POST /mcp` (streamable-http),
-`GET /health`, `GET /stream/<id>.mp3` — không cần `mcp_pipe.py` trên cloud.
+Server gộp MCP + stream vào **một process trên Render**: `mcp_pipe.py` kết
+nối OUT tới `MCP_ENDPOINT` (wss api.xiaozhi.me) để đăng ký 2 tool nhạc 24/7;
+`server.py` chạy stdio, thread nền phục vụ `/health` + `/stream/<id>.mp3`.
 
 1. Push cả repo lên GitHub. Có 2 cách:
    - **Blueprint (khuyến nghị):** Render → New → Blueprint → chọn repo
      (dùng `render.yaml` ở **gốc repo**, trỏ `./Dockerfile` gốc).
    - **Web Service:** New Web Service → Docker → dùng `Dockerfile` ở gốc repo
-     (COPY `tools/zing-music-mcp/*`). cũng được.
-2. Environment variables:
-   - `MCP_TRANSPORT` = `streamable-http` (mặc định, `render.yaml` đã set)
-   - `PUBLIC_BASE` = `https://<tên-service>.onrender.com`
-   - (tùy chọn) `MCP_ENDPOINT` chỉ cần khi chạy mode `stdio` qua `mcp_pipe.py`
-3. Deploy. Health check tự động qua `/health`. Lưu ý gói **free sẽ ngủ sau
-   ~15 phút không traffic** (lần gọi MCP/stream đầu mất thêm ~30-50 giây);
-   chạy ổn định thì dùng gói Starter (~$7/tháng).
-4. Client MCP (xiaozhi.me hoặc client hỗ trợ streamable-http) trỏ endpoint
-   `https://<tên-service>.onrender.com/mcp` — nếu client chỉ nhận WSS
-   (Điểm cuối MCP dạng `wss://...` thì vẫn chạy `run.bat` local như trên).
-5. Lưu ý: YouTube có thể gắt hơn với IP datacenter — nếu resolve bị chặn
-   thì nạp cookies Google vào yt-dlp (`cookiesfrombrowser`).
+     (COPY `tools/zing-music-mcp/*`).
+2. Environment variables (dashboard Render):
+   - `MCP_ENDPOINT` = link Điểm cuối MCP `wss://api.xiaozhi.me/mcp/?token=...`
+     lấy từ xiaozhi.me — **BẮT BUỘC** (token xoay vòng thì cập nhật lại rồi restart).
+   - `PUBLIC_BASE` = `https://<tên-service>.onrender.com` — **BẮT BUỘC** (không
+     set thì stream URL trả IP nội bộ container, robot không tải được nhạc).
+   - `MCP_TRANSPORT` = `stdio` (`render.yaml` đã set).
+3. Deploy: log phải thấy `Successfully connected to WebSocket server`, vào
+   xiaozhi.me thấy 2 tool quay lại, `GET /health` trả `{"ok":true}`.
+4. Lưu ý:
+   - Gói **free ngủ sau ~15 phút không traffic** → khi ngủ tool biến mất;
+     chặn bằng cron ping `/health` mỗi 10 phút (cron-job.org) hoặc upgrade
+     Starter (~$7/tháng).
+   - YouTube có thể gắt hơn với IP datacenter — nếu resolve bị chặn thì nạp
+     cookies Google vào yt-dlp (`cookiesfrombrowser`).
 
 ## Cấu hình prompt trên xiaozhi.me (Vai trò)
 
@@ -131,17 +134,16 @@ Nếu lỗi thì báo tôi. Không tự phát nhạc khác khi tôi không yêu 
 ## Kiến trúc & giới hạn
 
 ```
-MODE 1 — Cloud (Render, MCP_TRANSPORT=streamable-http, 1 cổng, 1 process):
+MODE 1 — Cloud (Render, MCP_TRANSPORT=stdio, 24/7, không cần laptop):
 
-  Client MCP ──POST /mcp──▶   ┐
-  Robot ──GET /stream/...──▶  ├─ server.py (uvicorn: /mcp + /health + /stream)
-  Render ──GET /health──▶     ┘        │
-                                       └─ yt-dlp resolve (RAM cache) → ffmpeg pipe
+  MCP: xiaozhi.me ◀──wss── mcp_pipe.py (trên Render) ──stdio── server.py
+  Robot ──GET /stream──▶ https://<tên-service>.onrender.com/stream/<id>.mp3
+                         (thread nền: /health + /stream trên PORT Render)
 
-MODE 2 — Local dev (MCP_TRANSPORT=stdio, run.bat):
+MODE 2 — Local dev (run.bat, laptop mở):
 
-  MCP: xiaozhi.me ◀──wss── mcp_pipe.py ──stdio── server.py
-  Robot ──stream──▶ /stream/<id>.mp3 (HTTP thread nền, cùng process)
+  MCP: xiaozhi.me ◀──wss── mcp_pipe.py (laptop) ──stdio── server.py
+  Robot ──GET /stream──▶ http://<IP-laptop>:8080/stream/<id>.mp3
 ```
 
 - **Đã test**: `/health` OK; `/stream/b866437922.mp3` trả MP3 hợp lệ

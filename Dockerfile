@@ -8,10 +8,12 @@ WORKDIR /app
 COPY tools/zing-music-mcp/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY tools/zing-music-mcp/server.py ./
+COPY tools/zing-music-mcp/server.py tools/zing-music-mcp/mcp_pipe.py ./
 
 # Render tự set PORT; mặc định khớp server.py.
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["python", "server.py"]
+# Pipe mode 24/7: mcp_pipe ket noi OUT wss api.xiaozhi.me (MCP_ENDPOINT),
+# server.py chay stdio + thread nen /health + /stream tren PORT.
+CMD ["python", "mcp_pipe.py", "server.py"]

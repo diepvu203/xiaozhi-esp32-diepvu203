@@ -14,4 +14,6 @@ COPY server.py mcp_pipe.py ./
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["python", "server.py"]
+# Pipe mode 24/7: mcp_pipe ket noi OUT wss api.xiaozhi.me (MCP_ENDPOINT),
+# server.py chay stdio + thread nen /health + /stream tren PORT.
+CMD ["python", "mcp_pipe.py", "server.py"]

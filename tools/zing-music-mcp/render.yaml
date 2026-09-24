@@ -11,10 +11,13 @@ services:
     envVars:
       - key: PUBLIC_BASE
         sync: false
-      # Go MCP truc tiep streamable-http — MCP (/mcp) + stream (/stream/*.mp3)
-      # chung mot process, mot cong. Khong can mcp_pipe tren Render.
+      # Pipe mode 24/7: mcp_pipe ket noi OUT den MCP_ENDPOINT (wss api.xiaozhi.me)
+      # de dang ky 2 tool nhac len xiaozhi.me; server.py chay stdio, thread nen
+      # phuc vu /health + /stream/*.mp3 tren PORT Render (healthCheckPath=/health).
       - key: MCP_TRANSPORT
-        value: streamable-http
+        value: stdio
+      - key: MCP_ENDPOINT
+        sync: false
       # Chat luong am thanh (bo trong = dung mac dinh trong server.py):
       #   AUDIO_SAMPLE_RATE=24000  -> phai khop AUDIO_OUTPUT_SAMPLE_RATE cua board
       #   AUDIO_CHANNELS=1         -> loa robot mono
