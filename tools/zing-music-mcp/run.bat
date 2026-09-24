@@ -9,7 +9,7 @@ REM  LAN 1: Mo file nay bang Notepad, dan URL Diem cuoi MCP
 REM         (lay tren web xiaozhi.me) vao bien ben duoi
 REM ============================================================
 
-set "MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEwMTk1MzgsImFnZW50SWQiOjIyMzYwMjYsImVuZHBvaW50SWQiOiJhZ2VudF8yMjM2MDI2IiwicHVycG9zZSI6Im1jcC1lbmRwb2ludCIsImlhdCI6MTc4ODgyODEyMywiZXhwIjoxODIwMzg1NzIzfQ.T6g69-fwN6p5VHSw2hITyU-Qyxlfrocc2Q3O-5AWrBusikMTUJl2_0mLDX6P_t8f5XF4lXQZziK_Vc7ytC_5Rw"
+set "MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEwMTk1MzgsImFnZW50SWQiOjIyMzYwMjYsImVuZHBvaW50SWQiOiJhZ2VudF8yMjM2MDI2IiwicHVycG9zZSI6Im1jcC1lbmRwb2ludCIsImlhdCI6MTc5MDIxNzExMiwiZXhwIjoxODIxNzc0NzEyfQ.D5BsbgooVCHSw7Z9FIcSFqoYnGpf29JRLeukns_XxYhk5VJAvuhXQDxPlm3H6IMFJgFe-LqZh5C3xheaKeA_RQ"
 
 REM ============================================================
 REM  Chat luong nhac (bo trong = dung mac dinh trong server.py):
