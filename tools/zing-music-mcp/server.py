@@ -464,6 +464,10 @@ def _resolve(key: str, title: str) -> dict:
         "title": chosen.get("title") or title,
         "uploader": chosen.get("uploader") or chosen.get("channel"),
         "duration": chosen.get("duration"),
+        # Headers yt-dlp dùng cho format này (UA android/ios/tv...) — _ffmpeg_chunks
+        # replay để googlevideo không 403.
+        "http_headers": (chosen.get("http_headers")
+                         or info.get("http_headers") or {}),
         "expires": time.time() + _RESOLVE_TTL,
     }
     with _lock:
@@ -482,7 +486,7 @@ def _resolve(key: str, title: str) -> dict:
 stream_app = FastAPI()
 
 
-def _ffmpeg_chunks(direct_url: str):
+def _ffmpeg_chunks(direct_url: str, headers: dict = None):
     # 1 lần convert duy nhất: nguồn -> PCM (swr + filter DSP) -> MP3 160 kbps.
     cmd = [
         FFMPEG, "-hide_banner", "-loglevel", "warning",
@@ -490,6 +494,22 @@ def _ffmpeg_chunks(direct_url: str):
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
+    ]
+    # Trùng khớp với cách yt-dlp tự tải: cùng proxy (cùng IP đã extract —
+    # googlevideo có thể gắn IP) + cùng http_headers (UA android/ios/tv —
+    # Google có thể 403 nếu ffmpeg gửi UA mặc định Lavf/xx).
+    if YTDLP_PROXY:
+        cmd += ["-http_proxy", YTDLP_PROXY]
+    if headers:
+        _ua = headers.get("User-Agent")
+        if _ua:
+            cmd += ["-user_agent", _ua]
+        _others = {k: v for k, v in headers.items()
+                   if k.lower() != "user-agent"}
+        if _others:
+            cmd += ["-headers", "".join(
+                f"{k}: {v}\r\n" for k, v in _others.items())]
+    cmd += [
         "-i", direct_url,
         "-vn",
         "-ac", AUDIO_CHANNELS,
@@ -507,12 +527,21 @@ def _ffmpeg_chunks(direct_url: str):
         cmd,
         stdout=subprocess.PIPE,
         stderr=sys.stderr)
+    sent = 0
     try:
         while True:
             chunk = proc.stdout.read(16 * 1024)
             if not chunk:
                 break
+            sent += len(chunk)
             yield chunk
+        if sent == 0:
+            # ffmpeg chết trước khi xuất byte (403/UA/proxy/IP-binding...) —
+            # log rõ để chẩn đoán trên Render; stderr ffmpeg cũng trỏ vào log.
+            sys.stderr.write(
+                f"[ffmpeg] NO OUTPUT rc={proc.poll()} "
+                f"url={direct_url[:140]}\n")
+            sys.stderr.flush()
     finally:
         try:
             proc.kill()
@@ -530,9 +559,10 @@ def stream(key: str):
         entry = _resolve(key, title)
     except Exception as e:
         raise HTTPException(502, f"resolve thất bại: {e}")
-    return StreamingResponse(_ffmpeg_chunks(entry["direct_url"]),
-                             media_type="audio/mpeg",
-                             headers={"Content-Type": "audio/mpeg"})
+    return StreamingResponse(
+        _ffmpeg_chunks(entry["direct_url"], entry.get("http_headers")),
+        media_type="audio/mpeg",
+        headers={"Content-Type": "audio/mpeg"})
 
 
 # /health ở ROOT cho Render healthCheckPath — đăng ký qua custom_route nên
