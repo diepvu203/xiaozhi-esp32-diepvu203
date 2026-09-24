@@ -428,12 +428,22 @@ def _resolve(key: str, title: str) -> dict:
                 sys.stderr.write(
                     "[music] resolved via player_client=android,ios,tv\n")
             except yt_dlp.utils.DownloadError as e:
+                sys.stderr.write(
+                    f"[music] player_client fallback failed "
+                    f"(cookies={'on' if COOKIES_FILE else 'off'}, "
+                    f"proxy={'on' if YTDLP_PROXY else 'off'}): {e}\n")
                 last_err = e
         if info is None:
+            sys.stderr.write(
+                f"[music] resolve give-up '{title}': cookies="
+                f"{'on' if COOKIES_FILE else 'off'}, proxy="
+                f"{'on' if YTDLP_PROXY else 'off'}, last={last_err}\n")
             raise RuntimeError(
                 f"không lấy được format nào cho '{title}' "
                 f"(formats={n_formats}, "
-                f"deno={'yes' if shutil.which('deno') else 'NO'}): {last_err}")
+                f"deno={'yes' if shutil.which('deno') else 'NO'}, "
+                f"cookies={'on' if COOKIES_FILE else 'off'}, "
+                f"proxy={'on' if YTDLP_PROXY else 'off'}): {last_err}")
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
     if not direct:
