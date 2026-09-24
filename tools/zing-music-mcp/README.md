@@ -152,6 +152,12 @@ trên dashboard (không cần cookies).
 
 Trên laptop (IP nhà) **không cần cookies** — resolve trực tiếp vẫn chạy.
 
+**Lỗi "Requested format is not available":** Dockerfile đã cài **deno** (JS
+runtime cho yt-dlp) — không có JS runtime thì YouTube **drop formats** ở một
+số video và yt-dlp báo đúng lỗi này; `server.py` cũng có retry ladder
+(`bestaudio` → `best` → default). Nếu vẫn gặp với 1 video cụ thể thì video đó
+có thể bị giới hạn tuổi / không khả dụng — bảo robot thử bài khác.
+
 ## Cấu hình prompt trên xiaozhi.me (Vai trò)
 
 ```

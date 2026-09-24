@@ -327,18 +327,41 @@ def _resolve(key: str, title: str) -> dict:
         cached = _resolved.get(key)
     if cached and cached.get("expires", 0) > time.time():
         return cached
-    opts = {
+    base_opts = {
         "quiet": True,
         "no_warnings": True,
         # Ưu tiên nguồn tốt hơn để giảm "generation loss" khi encode lại MP3
         # (Opus ~160k / AAC 128k tốt hơn hẳn mp3 128k của YouTube).
-        "format": "bestaudio[abr<=192]/bestaudio[abr<=128]/bestaudio/best",
         "default_search": "ytsearch1",
         "noplaylist": True,
     }
-    _apply_ydl_auth(opts)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(title, download=False)
+    # Ladder phòng hờ "Requested format is not available": một số video không
+    # khớp selector hẹp (formats bị drop khi thiếu JS runtime / format lạ)
+    # -> nới dần bestaudio[abr<=192] -> bestaudio -> best -> default, mới bỏ cuộc.
+    _format_tiers = (
+        "bestaudio[abr<=192]/bestaudio[abr<=128]/bestaudio/best",
+        "bestaudio/best",
+        "best",
+        None,  # selector mặc định của yt-dlp
+    )
+    info = None
+    last_err = None
+    for fmt in _format_tiers:
+        opts = dict(base_opts)
+        if fmt:
+            opts["format"] = fmt
+        _apply_ydl_auth(opts)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(title, download=False)
+            break
+        except yt_dlp.utils.DownloadError as e:
+            if "Requested format is not available" not in str(e):
+                raise  # lỗi khác (bot-check, unavailable...) -> nổi lên ngay
+            last_err = e
+    if info is None:
+        raise RuntimeError(
+            f"không lấy được format nào cho '{title}': {last_err}")
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
     if not direct:
