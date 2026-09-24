@@ -10,8 +10,8 @@ Kiến trúc:
   - HTTP `GET /stream/{id}.mp3`: lúc robot kết nối thì resolve direct URL
     googlevideo bằng yt-dlp (cache RAM ~30 phút), spawn ffmpeg pipe ra stdout
     và StreamingResponse truyền thẳng xuống HTTP — 0 file tạm trên đĩa.
-    Chuỗi convert: PCM 24 kHz mono (highpass 80 Hz + limiter -1 dBFS) ->
-    MP3 128 kbps (xem AUDIO_* bên dưới để chỉnh mà không cần sửa code).
+    Chuỗi convert: PCM 24 kHz mono -> MP3 (mặc định 160 kbps; xem AUDIO_*
+    bên dưới để chỉnh mà không cần sửa code).
 
 Server gộp MCP + HTTP stream vào MỘT process (một cổng duy nhất):
   - MCP streamable-http: endpoint POST /mcp  (mặc định — deploy cloud/Render)
@@ -23,10 +23,15 @@ Cấu hình qua biến môi trường:
   MCP_TRANSPORT — streamable-http (mặc định) | stdio
   PUBLIC_BASE   — base URL công khai cho stream URL (vd https://xxx.onrender.com).
                   Bỏ trống thì tự dùng http://<IP-LAN>:<PORT> (chạy laptop dev).
+  YTDLP_COOKIES_B64 — base64 của cookies.txt Netscape cho yt-dlp (chống
+                  "Sign in to confirm you're not a bot" khi deploy IP datacenter).
+                  Xem README để biết cách export cookies.
+  YTDLP_PROXY    — proxy tùy chọn cho yt-dlp (vd http://user:pass@host:port).
 
 Chạy: python server.py
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -35,6 +40,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -144,6 +150,41 @@ if AUDIO_FILTERS is None:
 else:
     AUDIO_PRESET = "custom(AUDIO_FILTERS)"
 
+# ---------------------------------------------------------------------------
+# YouTube anti-bot: cookies + proxy (env-tunable)
+# ---------------------------------------------------------------------------
+# IP datacenter (Render) thường bị YouTube gắn cờ -> lỗi
+# "Sign in to confirm you're not a bot" ở bước _resolve (search extract_flat
+# vẫn chạy được). Cách chính thức theo yt-dlp: gửi cookies Netscape:
+#   YTDLP_COOKIES_B64 — base64 của cookies.txt export từ trình duyệt đang
+#                       đăng nhập YouTube (cách export xem README).
+#   YTDLP_PROXY       — proxy tùy chọn, vd http://user:pass@host:port.
+COOKIES_FILE = None
+_cookies_b64 = os.environ.get("YTDLP_COOKIES_B64", "").strip()
+if _cookies_b64:
+    try:
+        _data = base64.b64decode(_cookies_b64)
+        COOKIES_FILE = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+        with open(COOKIES_FILE, "wb") as _f:
+            _f.write(_data)
+        sys.stdout.write(f"[music] cookies loaded ({len(_data)} bytes)\n")
+        sys.stdout.flush()
+    except Exception as e:
+        COOKIES_FILE = None
+        sys.stderr.write(f"[music] YTDLP_COOKIES_B64 decode failed: {e}\n")
+
+YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
+
+
+def _apply_ydl_auth(opts: dict) -> dict:
+    """Gắn cookiefile/proxy vào opts yt-dlp nếu env corresponding có set."""
+    if COOKIES_FILE:
+        opts["cookiefile"] = COOKIES_FILE
+    if YTDLP_PROXY:
+        opts["proxy"] = YTDLP_PROXY
+    return opts
+
+
 mcp = FastMCP("music-server", host="0.0.0.0", port=PORT)
 
 # RAM-only state
@@ -214,6 +255,7 @@ def _search_youtube(query: str, n: int) -> list:
         "extract_flat": True,
         "default_search": f"ytsearch{n}",
     }
+    _apply_ydl_auth(opts)
     entries = []
     for attempt in range(2):
         try:
@@ -294,6 +336,7 @@ def _resolve(key: str, title: str) -> dict:
         "default_search": "ytsearch1",
         "noplaylist": True,
     }
+    _apply_ydl_auth(opts)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(title, download=False)
     chosen = info["entries"][0] if "entries" in info else info
@@ -386,6 +429,8 @@ def stream(key: str):
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,
+        "cookies": bool(COOKIES_FILE),
+        "proxy": bool(YTDLP_PROXY),
         "audio": {
             "sample_rate": AUDIO_SAMPLE_RATE,
             "channels": AUDIO_CHANNELS,

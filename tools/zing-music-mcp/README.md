@@ -119,8 +119,38 @@ nối OUT tới `MCP_ENDPOINT` (wss api.xiaozhi.me) để đăng ký 2 tool nh�
    - Gói **free ngủ sau ~15 phút không traffic** → khi ngủ tool biến mất;
      chặn bằng cron ping `/health` mỗi 10 phút (cron-job.org) hoặc upgrade
      Starter (~$7/tháng).
-   - YouTube có thể gắt hơn với IP datacenter — nếu resolve bị chặn thì nạp
-     cookies Google vào yt-dlp (`cookiesfrombrowser`).
+   - YouTube chặn IP datacenter → xem mục **"YouTube chặn 'Sign in to confirm
+     you're not a bot'"** bên dưới.
+
+## YouTube chặn "Sign in to confirm you're not a bot"
+
+IP datacenter của Render bị YouTube gắn cờ → bước `_resolve` (lấy direct URL)
+thất bại, log thấy đúng câu lỗi này. `search_song` vẫn chạy (extract_flat
+không bị check) nên robot "tìm được bài nhưng không phát được".
+
+Sửa bằng cookies (cách chính thức yt-dlp khuyến nghị):
+
+1. **Export cookies** từ máy đang đăng nhập YouTube (chọn 1 cách):
+   - Extension **"Get cookies.txt LOCALLY"** (Chrome/Edge/Firefox) → mở
+     youtube.com → Export → được `cookies.txt` (định dạng Netscape).
+   - Hoặc CLI (trên máy đã đăng nhập):
+     ```powershell
+     yt-dlp --cookies-from-browser chrome --cookies cookies.txt --skip-download https://www.youtube.com
+     ```
+2. **Encode base64** (PowerShell, thực hiện trong thư mục chứa cookies.txt):
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\cookies.txt"))
+   ```
+3. Render dashboard → **Environment** → thêm biến `YTDLP_COOKIES_B64` =
+   dán chuỗi base64 (biến secret, `sync:false` trong render.yaml — **KHÔNG
+   commit nội dung cookies vào git**) → Save → service tự redeploy.
+4. Kiểm tra: `GET /health` phải thấy `"cookies": true`, rồi thử yêu cầu hát.
+5. Cookies hết hạn / YouTube xoay session → export lại + cập nhật env.
+
+Phương án phụ: có proxy IP sạch thì set `YTDLP_PROXY=http://user:pass@host:port`
+trên dashboard (không cần cookies).
+
+Trên laptop (IP nhà) **không cần cookies** — resolve trực tiếp vẫn chạy.
 
 ## Cấu hình prompt trên xiaozhi.me (Vai trò)
 

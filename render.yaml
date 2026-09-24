@@ -17,6 +17,13 @@ services:
         value: stdio
       - key: MCP_ENDPOINT
         sync: false
+      # YouTube anti-bot: base64 cua cookies.txt (trinh duy dang nhap YouTube).
+      # IP datacenter bi chan "Sign in to confirm you're not a bot".
+      - key: YTDLP_COOKIES_B64
+        sync: false
+      # Proxy tuy chon neu co (vd http://user:pass@host:port).
+      - key: YTDLP_PROXY
+        sync: false
       # Chat luong am thanh (bo trong = dung mac dinh trong server.py):
       #   AUDIO_SAMPLE_RATE=24000  -> phai khop AUDIO_OUTPUT_SAMPLE_RATE cua board
       #   AUDIO_CHANNELS=1         -> loa robot mono
