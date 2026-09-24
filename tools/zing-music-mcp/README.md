@@ -141,11 +141,33 @@ Sửa bằng cookies (cách chính thức yt-dlp khuyến nghị):
    ```powershell
    [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\cookies.txt"))
    ```
-3. Render dashboard → **Environment** → thêm biến `YTDLP_COOKIES_B64` =
+3. **Self-check base64 trước khi paste vào Render** — byte đầu PHẢI là `35`
+   (`0x23` = `'#'`). Nếu là `239` (`0xEF`) là **UTF-8 BOM** — chính BOM gây
+   lỗi `does not look like a Netscape format cookies file` (Python đọc file
+   ở text mode, BOM thành ký tự ẩn `U+FEFF` bám trước `# Netscape...` →
+   regex magic của `http.cookiejar` không match → `LoadError`):
+   ```powershell
+   $b64 = '<dán base64 vào đây>'
+   $d = [Convert]::FromBase64String($b64)
+   $d[0]                              # 35 = OK; 239 = có BOM
+   [Text.Encoding]::UTF8.GetString($d, 0, 30)   # ẨN BOM -> nhìn "đúng" nhưng chưa đủ!
+   ```
+   Nếu file có BOM thì strip trước khi encode lại:
+   ```powershell
+   $d = [IO.File]::ReadAllBytes("$PWD\cookies.txt")
+   if ($d[0] -eq 0xEF -and $d[1] -eq 0xBB -and $d[2] -eq 0xBF) { $d = $d[3..($d.Length-1)] }
+   [Convert]::ToBase64String($d)
+   ```
+   (Server cũng tự strip UTF-8 BOM lúc boot — self-check để chắc file không
+   hỏng theo cách khác.)
+4. Render dashboard → **Environment** → thêm biến `YTDLP_COOKIES_B64` =
    dán chuỗi base64 (biến secret, `sync:false` trong render.yaml — **KHÔNG
    commit nội dung cookies vào git**) → Save → service tự redeploy.
-4. Kiểm tra: `GET /health` phải thấy `"cookies": true`, rồi thử yêu cầu hát.
-5. Cookies hết hạn / YouTube xoay session → export lại + cập nhật env.
+5. Kiểm tra: `GET /health` phải thấy `"cookies": true` — nghĩa là server
+   đã decode **VÀ** validate qua Netscape header (file hỏng → server từ chối
+   và trả `"cookies": false`, lý do chi tiết nằm trong log Render: dòng
+   `YTDLP_COOKIES_B64 rejected: ...`). Rồi thử yêu cầu hát.
+6. Cookies hết hạn / YouTube xoay session → export lại + cập nhật env.
 
 Phương án phụ: có proxy IP sạch thì set `YTDLP_PROXY=http://user:pass@host:port`
 trên dashboard (không cần cookies).

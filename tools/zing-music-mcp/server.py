@@ -170,15 +170,36 @@ COOKIES_FILE = None
 _cookies_b64 = os.environ.get("YTDLP_COOKIES_B64", "").strip()
 if _cookies_b64:
     try:
+        # Decode -> bytes THÔ rồi ghi binary ("wb") — tuyệt đối KHÔNG
+        # .decode('utf-8') rồi ghi text mode 'w': giữ nguyên từng byte
+        # (tab, \r\n) và không bị newline translation đổi bytes.
         _data = base64.b64decode(_cookies_b64)
+        # Gỡ UTF-8 BOM (EF BB BF) nếu có: http.cookiejar mở file ở TEXT
+        # mode nên BOM thành ký tự U+FEFF bám trước "# Netscape" ->
+        # NETSCAPE_MAGIC_RGX không match -> LoadError
+        # "does not look like a Netscape format cookies file".
+        if _data.startswith(b"\xef\xbb\xbf"):
+            _data = _data[3:]
+            sys.stderr.write("[music] cookies: stripped UTF-8 BOM\n")
+        # Validate đúng regex magic của http.cookiejar NGAY lúc boot
+        # (fail-fast trung thực — /health "cookies" chỉ true khi file
+        # đọc được thật; lý do nằm trong log Render thay vì yt-dlp fail
+        # về sau với thông báo mơ hồ):
+        _head = _data.split(b"\n", 1)[0]
+        if not re.match(rb"#( Netscape)? HTTP Cookie File", _head):
+            raise ValueError(
+                "dòng đầu không phải Netscape magic: %r" % (_head[:60],))
         COOKIES_FILE = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
         with open(COOKIES_FILE, "wb") as _f:
             _f.write(_data)
-        sys.stdout.write(f"[music] cookies loaded ({len(_data)} bytes)\n")
-        sys.stdout.flush()
+        sys.stderr.write(
+            f"[music] cookies: Netscape OK ({len(_data)} bytes) -> "
+            f"{COOKIES_FILE}\n")
+        sys.stderr.flush()
     except Exception as e:
         COOKIES_FILE = None
-        sys.stderr.write(f"[music] YTDLP_COOKIES_B64 decode failed: {e}\n")
+        sys.stderr.write(f"[music] YTDLP_COOKIES_B64 rejected: {e}\n")
+        sys.stderr.flush()
 
 YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
 
@@ -323,8 +344,8 @@ def _preresolve_bg(key: str, title: str) -> None:
         try:
             _resolve(key, title)
         except Exception as e:  # noqa: BLE001 - best effort warm-up only
-            sys.stdout.write(f"[music] preresolve failed for '{title}': {e}\n")
-            sys.stdout.flush()
+            sys.stderr.write(f"[music] preresolve failed for '{title}': {e}\n")
+            sys.stderr.flush()
 
     threading.Thread(target=_work, daemon=True).start()
 
@@ -363,6 +384,12 @@ def _resolve(key: str, title: str) -> dict:
                 info = ydl.extract_info(title, download=False)
             break
         except yt_dlp.utils.DownloadError as e:
+            if "not a bot" in str(e) or "Sign in to confirm" in str(e):
+                # Bot-check (datacenter IP): do NOT raise here — fall through
+                # to the player_client=[android,ios,tv] fallback below (it
+                # does not need web-sig/PO-token) instead of dying at tier 1.
+                last_err = e
+                break
             if "Requested format is not available" not in str(e):
                 raise  # lỗi khác (bot-check, unavailable...) -> nổi lên ngay
             last_err = e
@@ -431,8 +458,8 @@ def _resolve(key: str, title: str) -> dict:
     }
     with _lock:
         _resolved[key] = entry
-    sys.stdout.write(f"[music] resolved '{entry['title']}'\n")
-    sys.stdout.flush()
+    sys.stderr.write(f"[music] resolved '{entry['title']}'\n")
+    sys.stderr.flush()
     return entry
 
 
@@ -554,10 +581,10 @@ def search_song(keyword: str) -> str:
     title, uploader, duration_sec, youtube_url. Dùng get_song_url để lấy
     stream URL mp3 cho robot phát."""
     res = _search_youtube(keyword, 5)
-    sys.stdout.write(f"[music] search '{keyword}' -> {len(res)} ket qua\n")
+    sys.stderr.write(f"[music] search '{keyword}' -> {len(res)} ket qua\n")
     for r in res[:3]:
-        sys.stdout.write(f"[music]   - {r.get('title')} | {r.get('uploader')}\n")
-    sys.stdout.flush()
+        sys.stderr.write(f"[music]   - {r.get('title')} | {r.get('uploader')}\n")
+    sys.stderr.flush()
     return json.dumps({"results": res}, ensure_ascii=False)
 
 
@@ -583,14 +610,14 @@ if __name__ == "__main__":
         q = " ".join(sys.argv[2:])
         print(json.dumps(_search_youtube(q, 3), ensure_ascii=False, indent=2))
     else:
-        sys.stdout.write(
+        sys.stderr.write(
             f"[music] transport={MCP_TRANSPORT} port={PORT} "
             f"(base={PUBLIC_BASE or 'auto-LAN'})\n")
-        sys.stdout.write(
+        sys.stderr.write(
             f"[music] audio: {AUDIO_SAMPLE_RATE} Hz x{AUDIO_CHANNELS}, "
             f"{AUDIO_BITRATE} mp3, preset={AUDIO_PRESET}\n")
-        sys.stdout.write(f"[music] filters: {AUDIO_FILTERS or '(none)'}\n")
-        sys.stdout.flush()
+        sys.stderr.write(f"[music] filters: {AUDIO_FILTERS or '(none)'}\n")
+        sys.stderr.flush()
         if MCP_TRANSPORT == "stdio":
             # Chế độ cũ: MCP stdio (qua mcp_pipe.py) + HTTP stream chạy nền.
             threading.Thread(target=_run_http, daemon=True).start()
