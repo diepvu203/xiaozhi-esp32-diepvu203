@@ -242,6 +242,30 @@ except Exception:
         "IP datacenter van bi bot-check (xem requirements.txt)\n")
 sys.stderr.flush()
 
+
+def _pot_server_up(timeout: float = 2.0) -> bool:
+    """Probe POT server (start.sh chay nen truoc khi python start).
+
+    POT_AVAILABLE chi noi plugin pip da cai; neu deno bi OOM-kill sau boot
+    thi provider that bai IM LAP (no_warnings=True) va bot-check van xay ra.
+    Chu the pot_srv=up/down trong log give-up / "pot_server" trong /health
+    phan biet ro 2 truong hop nay.
+    """
+    try:
+        with urllib.request.urlopen(
+                "http://127.0.0.1:4416/ping", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+if POT_AVAILABLE:
+    # Correlate voi log "[start] ... ready/WARNING" cua start.sh.
+    sys.stderr.write(
+        "[music] bgutil POT server /ping khi boot: "
+        f"{'up' if _pot_server_up() else 'DOWN — xem log [start] cua start.sh'}\n")
+    sys.stderr.flush()
+
 if not _cookies_b64 and not POT_AVAILABLE:
     # Khong co cookies VA khong co PO token -> bot-check chac chan chan;
     # thieu mot trong hai thi nguon kia (POT hoac cookies) dam nhan.
@@ -483,24 +507,37 @@ def _resolve(key: str, title: str) -> dict:
                     f"proxy={'on' if YTDLP_PROXY else 'off'}): {e}\n")
                 last_err = e
         if info is None:
+            _srv = _pot_server_up() if POT_AVAILABLE else False
             sys.stderr.write(
                 f"[music] resolve give-up '{title}': cookies="
                 f"{'on' if COOKIES_FILE else 'off'}, proxy="
                 f"{'on' if YTDLP_PROXY else 'off'}, "
-                f"pot={'on' if POT_AVAILABLE else 'off'}, last={last_err}\n")
+                f"pot={'on' if POT_AVAILABLE else 'off'}, "
+                f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}, "
+                f"last={last_err}\n")
             _hint = ""
             if last_err is not None and any(
                     s in str(last_err)
                     for s in ("not a bot", "Sign in to confirm")):
                 # Bot-check that survived BOTH tier-1 and player_client
                 # fallback = session/IP problem, khong phai format problem.
-                if POT_AVAILABLE:
-                    # PO token đã cài mà vẫn bị → IP/proxy là thủ phạm.
+                if POT_AVAILABLE and not _srv:
+                    # Plugin cai roi nhung server POT khong tra loi luc yt-dlp
+                    # can token -> provider that bai im lap (no_warnings=True).
+                    _hint = (
+                        " -> POT server DOWN khi yt-dlp cần PO token "
+                        "(127.0.0.1:4416 không /ping — nghi deno OOM-kill trên "
+                        "512MB): xem log [start], restart service; lặp lại -> "
+                        "tăng RAM instance")
+                elif POT_AVAILABLE:
+                    # PO token hoạt động mà Google vẫn đòi đăng nhập →
+                    # IP/proxy session mới là thủ phạm.
                     _hint = (
                         " -> PO token (bgutil) đã cài nhưng vẫn bị bot-check: "
                         "IP proxy bị flag — xoay proxy mới (nên sticky/"
-                        "residential) hoặc tạm xóa YTDLP_PROXY để test "
-                        "(xem README)")
+                        "residential) hoặc tạm xóa YTDLP_PROXY; cookies đang "
+                        "on thì xóa luôn YTDLP_COOKIES_B64 (session revoked "
+                        "gây hard-block) để test từng biến (xem README)")
                 elif COOKIES_FILE:
                     _hint = (
                         " -> cookie YouTube hết hạn/bị revoke: export lại "
@@ -517,7 +554,8 @@ def _resolve(key: str, title: str) -> dict:
                 f"deno={'yes' if shutil.which('deno') else 'NO'}, "
                 f"cookies={'on' if COOKIES_FILE else 'off'}, "
                 f"proxy={'on' if YTDLP_PROXY else 'off'}, "
-                f"pot={'on' if POT_AVAILABLE else 'off'}): "
+                f"pot={'on' if POT_AVAILABLE else 'off'}, "
+                f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}): "
                 f"{last_err}{_hint}")
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
@@ -1038,6 +1076,7 @@ async def health(request: Request) -> JSONResponse:
         "ok": True,
         "cookies": bool(COOKIES_FILE),
         "pot": POT_AVAILABLE,
+        "pot_server": _pot_server_up(timeout=1.0),
         "proxy": bool(YTDLP_PROXY),
         "cache": {
             "dir": MEDIA_DIR,

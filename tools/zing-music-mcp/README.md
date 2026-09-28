@@ -156,17 +156,26 @@ yt-dlp để vượt "Sign in to confirm you're not a bot" *không cần cookies
 
 Kiểm tra sau deploy (Render log):
 
-1. Boot: `[music] bgutil PO-token plugin 2.0.0 OK -> ...` và
-   `[start] bgutil POT server ready (pid ...)`.
+1. Boot: `[music] bgutil PO-token plugin 2.0.0 OK -> ...`,
+   `[start] bgutil POT server ready (pid ...)` và
+   `[music] bgutil POT server /ping khi boot: up`.
 2. Thử hát **liên tiếp nhiều bài** — không còn lỗi
    "Sign in to confirm you're not a bot".
 3. Khi POT đã hoạt động ổn định: **xóa `YTDLP_COOKIES_B64`** trên Render
    (Environment → Remove → Save) để khỏi phải export cookies mỗi ngày.
    Để lại cookies cũng được, nhưng không còn bắt buộc.
 
-Nếu VẪN còn lỗi bot-check dù đã có POT → IP proxy mới là thủ phạm: xoay
-proxy mới (nên dùng loại **sticky/residential** — IP cố định) hoặc tạm xóa
-`YTDLP_PROXY` để test từng biến một.
+Nếu VẪN còn lỗi bot-check dù đã có POT → đọc trường `pot_srv=` trong log
+`resolve give-up` (hoặc `GET /health` → `pot_server`) rồi xử lý theo:
+
+- **`pot_srv=down`** — server POT không trả lời `/ping` lúc yt-dlp cần
+  token (nghi deno bị OOM-kill trên instance 512MB): xem log `[start]`
+  (WARNING hoặc ready muộn), restart service; lặp lại → tăng RAM instance.
+- **`pot_srv=up`** — PO token đã đi được nhưng Google vẫn chặn, theo thứ tự:
+  1. **Xóa `YTDLP_COOKIES_B64`** rồi test — session cookies bị revoke có
+     thể gây hard-block "Sign in" ngay cả khi đã có PO token.
+  2. Còn chặn → **xoay proxy** mới (nên dùng loại **sticky/residential** —
+     IP cố định) hoặc tạm xóa `YTDLP_PROXY` để test IP Render trực tiếp.
 
 Sửa bằng cookies (phương án dự phòng, khi PO token chưa dùng được):
 
