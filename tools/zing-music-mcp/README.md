@@ -1,11 +1,13 @@
 # MCP Server Nhạc Việt cho Xe Robot XiaoZhi — Cloud Stream Proxy
 
-Server MCP tìm nhạc trên **YouTube** (qua `yt-dlp`) và phục vụ **stream MP3
-on-the-fly qua HTTP** (FastAPI `StreamingResponse` + ffmpeg pipe), gộp cùng
-MCP server (`search_song`, `get_song_url`) trong **một process, một cổng**
-(`/mcp` streamable-http + `/stream/<id>.mp3` + `/health`).
-**100% RAM, không ghi file tạm ra đĩa.** Robot chỉ nhận 1 URL stream duy nhất
-và tự stream qua WiFi của nó.
+Server MCP tìm nhạc trên **YouTube** (qua `yt-dlp`) và phục vụ **file MP3
+đã tải sẵn qua HTTP** (FastAPI `FileResponse` / `StreamingResponse`), gộp
+cùng MCP server (`search_song`, `get_song_url`) trong **một process, một
+cổng** (`/mcp` streamable-http + `/stream/<id>.mp3` + `/health`).
+**Preload xuống đĩa**: `get_song_url` tải + transcode nền vào cache
+(`<tmp>/zing-music/<id>.mp3`, tối đa 20 bài) — robot mở URL là nhận file có
+`Content-Length`, không còn pipe sống bị đứt giữa chừng (nguyên nhân hat dut
+trước đây). Robot chỉ nhận 1 URL stream duy nhất và tự stream qua WiFi.
 
 ## Tool cung cấp
 
@@ -14,9 +16,14 @@ và tự stream qua WiFi của nó.
 | `search_song` | `keyword` (tên bài / ca sĩ) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `youtube_url` |
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
 
-Cơ chế: khi robot (hoặc VLC) mở `/stream/<id>.mp3`, server resolve direct URL
-googlevideo bằng yt-dlp (cache RAM ~30 phút) rồi pipe `ffmpeg` (mặc định
-CBR 160k, xem `AUDIO_BITRATE`) thẳng ra HTTP response.
+Cơ chế: `get_song_url` bắt đầu **preload nền** ngay (resolve googlevideo +
+tải chunk 1 MB có resume + transcode MP3 CBR 160k — xem `AUDIO_BITRATE` —
+ghi vào cache đĩa). Khi robot (hoặc VLC) mở `/stream/<id>.mp3`: file có sẵn
+→ trả ngay `FileResponse` (`Content-Length`); chưa xong → trả `200` ngay và
+gửi **silence primer** (MP3 im cùng sample-rate/channels/bitrate, 8 KB, pace ~real-time)
+để kết nối không chết (firmware pre-buffer 64 KB, timeout đọc 15 s), rồi
+chuyển sang toàn bộ file. Tải lỗi / quá 240 s → fallback pipe `ffmpeg`
+trực tiếp (hành vi cũ, giảm cấp).
 
 ## Cấu hình (biến môi trường)
 
@@ -31,6 +38,8 @@ CBR 160k, xem `AUDIO_BITRATE`) thẳng ra HTTP response.
 | `AUDIO_PRESET` | Bộ lọc DSP bù trừ loa. Mặc định `speaker`. Xem bảng dưới |
 | `AUDIO_BITRATE` | Bitrate MP3. Mặc định `160k` — mức cao nhất libmp3lame cho phép ở 24 kHz (MPEG-2 LSF) |
 | `AUDIO_FILTERS` | Chuỗi `ffmpeg -af` tuỳ ý, **đè** preset khi được set. `""` = tắt DSP |
+| `MUSIC_CACHE_DIR` | Thư mục cache bài hát đã tải. Mặc định `<tmp>/zing-music` |
+| `MUSIC_CACHE_MAX_FILES` | Số bài giữ trong cache (mỗi bài ~1–12 MB). Mặc định `20` |
 
 Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi khởi động để bạn biết cấu hình đang chạy.
 
@@ -204,8 +213,9 @@ MODE 2 — Local dev (run.bat, laptop mở):
   Robot ──GET /stream──▶ http://<IP-laptop>:8080/stream/<id>.mp3
 ```
 
-- **Đã test**: `/health` OK; `/stream/b866437922.mp3` trả MP3 hợp lệ
-  (5:00.53, 160kbps, 48kHz stereo) — convert on-the-fly, 0 file đĩa.
+- **Đã test**: `/health` OK; `/stream/<id>.mp3` trả MP3 hợp lệ — cache sẵn
+  thì có `Content-Length` ngay; đang preload thì nhận silence primer rồi
+  chuyển mượt sang file. Tải trước về đĩa, không còn stream pipe sống.
 - Direct URL googlevideo bị khóa theo IP + hết hạn → luôn stream qua server
   (IP của server quyết định); không trả direct URL cho robot.
 

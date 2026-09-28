@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-XiaoZhi Music MCP Server — Cloud Stream Proxy (RAM-only, không file đĩa).
+XiaoZhi Music MCP Server — Preload to disk + Cloud Stream Proxy.
 
 Kiến trúc:
   - MCP tool `search_song(keyword)`: tìm bài trên YouTube (yt-dlp, có fallback
     scrape HTML khi bị anti-bot).
-  - MCP tool `get_song_url(title)`: trả NGAY lập tức stream URL công khai
-    `<PUBLIC_BASE>/stream/<id>.mp3` (id = md5(title)); không tải gì trước.
-  - HTTP `GET /stream/{id}.mp3`: lúc robot kết nối thì resolve direct URL
-    googlevideo bằng yt-dlp (cache RAM ~30 phút), spawn ffmpeg pipe ra stdout
-    và StreamingResponse truyền thẳng xuống HTTP — 0 file tạm trên đĩa.
-    Chuỗi convert: PCM 24 kHz mono -> MP3 (mặc định 160 kbps; xem AUDIO_*
-    bên dưới để chỉnh mà không cần sửa code).
+  - MCP tool `get_song_url(title)`: trả NGAY stream URL công khai
+    `<PUBLIC_BASE>/stream/<id>.mp3` (id = md5(title)) và START preload nền:
+    resolve -> tải source (chunk 1 MB, có Range/resume) -> transcode MP3 ->
+    ghi file `{key}.mp3` vào MUSIC_CACHE_DIR (mặc định <tmp>/zing-music).
+  - HTTP `GET /stream/{id}.mp3`:
+      * file đã có  -> FileResponse (Content-Length; đọc lại được, kể cả
+        sau khi server restart).
+      * chưa có     -> trả 200 ngay + silence primer (MP3 im cùng thông số,
+        8 KB, pace ~real-time) giữ kết nối trong khi preload chạy, rồi chuyển sang
+        toàn bộ file (decoder nhận MP3 liên tục, không đứt giữa chừng).
+      * preload lỗi / quá 240 s -> fallback live ffmpeg pipe (hành vi cũ).
+    Chuỗi convert: nguồn -> PCM 24 kHz mono -> MP3 (mặc định 160 kbps; xem
+    AUDIO_* bên dưới để chỉnh mà không cần sửa code).
 
 Server gộp MCP + HTTP stream vào MỘT process (một cổng duy nhất):
   - MCP streamable-http: endpoint POST /mcp  (mặc định — deploy cloud/Render)
@@ -52,7 +58,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import yt_dlp
 from fastapi import FastAPI, HTTPException
 from starlette.routing import Mount
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.requests import Request
 
 from mcp.server.fastmcp import FastMCP
@@ -235,8 +241,6 @@ def _apply_ydl_auth(opts: dict) -> dict:
 
 mcp = FastMCP("music-server", host="0.0.0.0", port=PORT)
 
-# RAM-only state
-
 
 # ---------------------------------------------------------------------------
 # Tìm kiếm YouTube (yt-dlp + fallback scrape HTML)
@@ -354,20 +358,6 @@ def _lan_ip() -> str:
 def _stream_url(key: str) -> str:
     base = PUBLIC_BASE or f"http://{_lan_ip()}:{PORT}"
     return f"{base}/stream/{key}.mp3"
-
-
-def _preresolve_bg(key: str, title: str) -> None:
-    """Pre-resolve the direct googlevideo URL in a background thread so the
-    first HTTP GET /stream/... is fast. Uses a thread (NOT asyncio) because
-    yt-dlp is blocking and the MCP tool runs outside the uvicorn event loop."""
-    def _work():
-        try:
-            _resolve(key, title)
-        except Exception as e:  # noqa: BLE001 - best effort warm-up only
-            sys.stderr.write(f"[music] preresolve failed for '{title}': {e}\n")
-            sys.stderr.flush()
-
-    threading.Thread(target=_work, daemon=True).start()
 
 
 def _resolve(key: str, title: str) -> dict:
@@ -521,6 +511,287 @@ def _resolve(key: str, title: str) -> dict:
 stream_app = FastAPI()
 
 
+# ---------------------------------------------------------------------------
+# Preload: TAI TRUOC bai hat ve dia TRUOC khi phuc vu /stream.
+# Ly do: stream ffmpeg pipe tu googlevideo khong co Content-Length/Range/dia,
+# upstream rot giua chung -> response het som -> robot doc thieu du lieu, mat
+# ket noi va restart bai (hat dut). File tren dia co Content-Length va doc lai
+# duoc (firmware reset tu dau van hat duoc toan bo bai).
+# ---------------------------------------------------------------------------
+
+_MEDIA_MIN_BYTES = 100_000  # mot bai hop le toi thieu ~100 KB
+
+
+def _size_of(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _final_path(key: str) -> str:
+    return os.path.join(MEDIA_DIR, f"{key}.mp3")
+
+
+def _part_path(key: str) -> str:
+    return os.path.join(MEDIA_DIR, f"{key}.part")
+
+
+def _src_path(key: str) -> str:
+    return os.path.join(MEDIA_DIR, f"{key}.src")
+
+
+def _preload_state(key: str) -> str:
+    with _lock:
+        return (_preload.get(key) or {}).get("state", "")
+
+
+def _preload_state_update(key: str, **fields) -> None:
+    with _lock:
+        _preload.setdefault(key, {}).update(fields)
+
+
+def _count_cache_files() -> int:
+    try:
+        return len([n for n in os.listdir(MEDIA_DIR)
+                    if n.endswith(".mp3") and not n.startswith("_")])
+    except OSError:
+        return 0
+
+
+def _prune_cache() -> None:
+    """Giu toi da _CACHE_MAX_FILES bai (moi bai ~1-12 MB; Render free chi co
+    ~1 GB dia). Bo bai cu nhat truoc, khong dot bai dang preload."""
+    try:
+        names = [n for n in os.listdir(MEDIA_DIR)
+                 if n.endswith(".mp3") and not n.startswith("_")]
+    except OSError:
+        return
+    if len(names) <= _CACHE_MAX_FILES:
+        return
+
+    def _mtime(n):
+        try:
+            return os.path.getmtime(os.path.join(MEDIA_DIR, n))
+        except OSError:
+            return 0.0
+
+    names.sort(key=_mtime)
+    for n in names[: len(names) - _CACHE_MAX_FILES]:
+        if _preload_state(n[:-4]) == "running":
+            continue
+        try:
+            os.remove(os.path.join(MEDIA_DIR, n))
+            sys.stderr.write(f"[music] prune cache: {n}\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+
+
+def _fetch_chunked(url: str, headers: dict, dest: str) -> int:
+    """Tai source bang chunk 1 MB co Range + resume. Phien bi dong giua chung
+    (proxy/googlevideo thuong dong som) -> retry TAI DO bang cung Range, khong
+    tai lai tu dau. Server bo qua Range (200 toan bo) -> ghi lai tu byte 0.
+    Tra ve tong so byte da ghi (== neu biet total)."""
+    hdrs = dict(headers or {})
+    for _drop in ("Range", "If-Range", "Content-Length"):
+        hdrs.pop(_drop, None)
+    hdrs["Accept-Encoding"] = "identity"
+    if YTDLP_PROXY:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(
+            {"http": YTDLP_PROXY, "https": YTDLP_PROXY}))
+    else:
+        opener = urllib.request.build_opener()
+    t0 = time.time()
+    start = 0
+    total = None
+    empties = 0
+    with open(dest, "wb") as out:
+        while True:
+            if time.time() - t0 > _DL_DEADLINE:
+                raise RuntimeError(
+                    f"tai qua {_DL_DEADLINE}s (nghi tai {start} byte)")
+            h = dict(hdrs)
+            h["Range"] = f"bytes={start}-{start + _CHUNK_BYTES - 1}"
+            req = urllib.request.Request(url, headers=h)
+            status, buf, crange, clen = 0, None, None, None
+            last = None
+            for attempt in range(_DL_ATTEMPTS):
+                try:
+                    with opener.open(req, timeout=30) as r:
+                        status = getattr(r, "status", None) or r.getcode()
+                        crange = r.headers.get("Content-Range")
+                        clen = r.headers.get("Content-Length")
+                        if status == 200 and start > 0:
+                            # Server khong ho tro Range -> doc lai tu dau.
+                            sys.stderr.write(
+                                "[music] chunked: server bo qua Range, "
+                                "tai lai tu byte 0\n")
+                            sys.stderr.flush()
+                            out.seek(0)
+                            out.truncate()
+                            start = 0
+                            total = None
+                        buf = r.read()
+                    last = None
+                    break
+                except Exception as e:  # noqa: BLE001 - retry cung Range
+                    last = e
+                    time.sleep(1 + attempt)
+            if last is not None:
+                raise RuntimeError(
+                    f"chunk @{start} loi {_DL_ATTEMPTS} lan: {last}")
+            if status == 416:
+                break  # start >= total: da tai het
+            if status not in (200, 206):
+                raise RuntimeError(f"HTTP {status} khi tai chunk @{start}")
+            if crange and "/" in crange:
+                try:
+                    _t = crange.rsplit("/", 1)[1]
+                    if _t != "*":
+                        total = int(_t)
+                except ValueError:
+                    pass
+            if total is None and status == 200 and clen:
+                try:
+                    total = int(clen)
+                except ValueError:
+                    pass
+            if not buf:
+                empties += 1
+                if empties >= 3:
+                    raise RuntimeError(f"doc rong x3 @{start}")
+                continue
+            empties = 0
+            out.write(buf)
+            out.flush()
+            start += len(buf)
+            if total is not None and start >= total:
+                break
+    if total is not None and start < total:
+        raise RuntimeError(f"thieu byte: {start}/{total}")
+    if start < _MEDIA_MIN_BYTES:
+        raise RuntimeError(f"source qua nho: {start} byte")
+    sys.stderr.write(f"[music] chunked OK {start} byte -> {dest}\n")
+    sys.stderr.flush()
+    return start
+
+
+def _download_ffmpeg(url: str, headers: dict, dest: str) -> None:
+    """Fallback tai truc tiep bang ffmpeg (nguon m3u8 / chunked loi):
+    -reconnect giu ket noi, ghi thang vao file. Cung DSP + MP3 args nhu ban
+    live de chat luong khong doi."""
+    cmd = [
+        FFMPEG, "-hide_banner", "-loglevel", "warning", "-y",
+        "-reconnect", "1", "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+    ]
+    if YTDLP_PROXY:
+        cmd += ["-http_proxy", YTDLP_PROXY]
+    if headers:
+        _ua = headers.get("User-Agent")
+        if _ua:
+            cmd += ["-user_agent", _ua]
+        _others = {k: v for k, v in headers.items()
+                   if k.lower() != "user-agent"}
+        if _others:
+            cmd += ["-headers", "".join(
+                f"{k}: {v}\r\n" for k, v in _others.items())]
+    cmd += ["-i", url, "-vn",
+            "-ac", AUDIO_CHANNELS, "-ar", str(AUDIO_SAMPLE_RATE)]
+    if AUDIO_FILTERS:
+        cmd += ["-af", AUDIO_FILTERS]
+    cmd += ["-codec:a", "libmp3lame", "-b:a", AUDIO_BITRATE,
+            "-f", "mp3", dest]
+    try:
+        proc = subprocess.run(cmd, timeout=_DL_DEADLINE + _XCODE_DEADLINE)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg tai qua han")
+    if proc.returncode != 0 or _size_of(dest) < _MEDIA_MIN_BYTES:
+        raise RuntimeError(
+            f"ffmpeg tai loi rc={proc.returncode} size={_size_of(dest)}")
+
+
+def _transcode_local(src: str, dest: str) -> None:
+    """Source da tai -> MP3 cung thong so ban live (-vn + DSP preset)."""
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-y",
+           "-i", src, "-vn",
+           "-ac", AUDIO_CHANNELS, "-ar", str(AUDIO_SAMPLE_RATE)]
+    if AUDIO_FILTERS:
+        cmd += ["-af", AUDIO_FILTERS]
+    cmd += ["-codec:a", "libmp3lame", "-b:a", AUDIO_BITRATE,
+            "-f", "mp3", dest]
+    try:
+        proc = subprocess.run(cmd, timeout=_XCODE_DEADLINE)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"transcode qua {_XCODE_DEADLINE}s")
+    if proc.returncode != 0 or _size_of(dest) < _MEDIA_MIN_BYTES:
+        raise RuntimeError(
+            f"transcode loi rc={proc.returncode} size={_size_of(dest)}")
+
+
+def _preload_worker(key: str, title: str) -> None:
+    """resolve -> tai source (chunked; m3u8/loi -> ffmpeg) -> transcode ->
+    publish atomic {key}.mp3. 2 chu ky: chu ky 2 resolve LAI (URL het han)."""
+    final, part, src = _final_path(key), _part_path(key), _src_path(key)
+    t0 = time.time()
+    err = None
+    for cycle in range(2):
+        try:
+            if cycle:
+                with _lock:
+                    _resolved.pop(key, None)  # buoc resolve URL moi
+                _preload_state_update(key, note="resolve-fresh")
+            entry = _resolve(key, title)
+            url = entry["direct_url"]
+            headers = entry.get("http_headers")
+            for p in (part, src):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            if ".m3u8" in url.lower():
+                _download_ffmpeg(url, headers, part)
+            else:
+                _fetch_chunked(url, headers, src)
+                _transcode_local(src, part)
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+            if _size_of(part) < _MEDIA_MIN_BYTES:
+                raise RuntimeError(
+                    f"mp3 qua nho sau transcode: {_size_of(part)}")
+            os.replace(part, final)  # atomic -> reader khong thay file nua do
+            _preload_state_update(key, state="ready", err="")
+            sys.stderr.write(
+                f"[music] preload OK '{entry['title']}' ({_size_of(final)} B, "
+                f"{time.time() - t0:.0f}s, cycle {cycle + 1})\n")
+            sys.stderr.flush()
+            _prune_cache()
+            return
+        except Exception as e:  # noqa: BLE001 - retry 1 lan roi failed
+            err = e
+            sys.stderr.write(f"[music] preload cycle {cycle + 1}/2 loi: {e}\n")
+            sys.stderr.flush()
+            time.sleep(2)
+    _preload_state_update(key, state="failed", err=str(err)[:300])
+
+
+def _preload_start(key: str, title: str) -> None:
+    """Khoi tai/preload bai (single-flight). Goi tu get_song_url (truoc khi
+    robot GET) va tu route /stream (neu get_song_url chua run)."""
+    with _lock:
+        st = (_preload.get(key) or {}).get("state")
+        if st == "running":
+            return
+        if st == "ready" and _size_of(_final_path(key)) > 0:
+            return
+        _preload[key] = {"state": "running", "t0": time.time(), "err": ""}
+    threading.Thread(target=_preload_worker, args=(key, title),
+                     daemon=True).start()
+
+
 def _ffmpeg_chunks(direct_url: str, headers: dict = None):
     # 1 lần convert duy nhất: nguồn -> PCM (swr + filter DSP) -> MP3 160 kbps.
     cmd = [
@@ -584,8 +855,115 @@ def _ffmpeg_chunks(direct_url: str, headers: dict = None):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Silence primer + stream body: khi file chua xong, server van gui MP3 lien
+# tuc (im cung thong so) de ket noi khong chet. Firmware (music_player.cc):
+# pre-buffer 64 KB truoc khi decode va timeout doc 15s moi lan doc -> server
+# IM = mat ket noi + restart bai. Im va bai THAT cung sample-rate/channels/
+# bitrate nen decoder chuyen doi lien tuc, khong mat dong (src_rate gan 1 lan).
+# ---------------------------------------------------------------------------
+def _ensure_silence() -> bytes:
+    """~10s MP3 im dung chung AUDIO_* cua bai hat, tao 1 lan bo cache."""
+    params = f"{AUDIO_SAMPLE_RATE}_{AUDIO_CHANNELS}_{AUDIO_BITRATE}"
+    path = os.path.join(MEDIA_DIR, f"_silence_{params}.mp3")
+    if os.path.exists(path) and os.path.getsize(path) >= 1000:
+        with open(path, "rb") as f:
+            data = f.read()
+        return data
+    layout = "mono" if AUDIO_CHANNELS == "1" else "stereo"
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+           "-f", "lavfi", "-i",
+           f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl={layout}",
+           "-t", "10", "-ac", AUDIO_CHANNELS,
+           "-codec:a", "libmp3lame", "-b:a", AUDIO_BITRATE,
+           "-f", "mp3", path]
+    proc = subprocess.run(cmd, timeout=60)
+    if proc.returncode != 0 or _size_of(path) < 1000:
+        raise RuntimeError(f"tao silence loi rc={proc.returncode}")
+    with open(path, "rb") as f:
+        data = f.read()
+    sys.stderr.write(f"[music] silence primer {len(data)} B ({params})\n")
+    sys.stderr.flush()
+    return data
+
+
+def _stream_body(key: str, title: str, entry: dict):
+    """Body cho ket noi /stream chua co file (4 truong hop):
+      1. File xong         -> doc toan bo file, dung (primer neu da gui ~0.4s).
+      2. Dang tai           -> primer silence 8 KB, pace ~realtime -> cho file
+                               xong roi chuyen sang file tu byte 0 (MP3 lien tuc).
+      3. Preload loi        -> live pipe giam cap (hanh vi cu truoc day).
+      4. Qua _BODY_WAIT_MAX -> live pipe giam cap.
+    """
+    final = _final_path(key)
+    t0 = time.time()
+    primed = False
+    silence = b""
+    off = 0
+    silence_err = False
+    while True:
+        if _size_of(final) > 0:
+            if primed:
+                sys.stderr.write(
+                    f"[music] primer->file switch key={key} sau "
+                    f"{time.time() - t0:.1f}s\n")
+                sys.stderr.flush()
+            try:
+                with open(final, "rb") as f:
+                    while True:
+                        buf = f.read(32 * 1024)
+                        if not buf:
+                            return
+                        yield buf
+            except OSError as e:
+                sys.stderr.write(f"[music] doc file loi: {e}\n")
+                sys.stderr.flush()
+                return
+        state = _preload_state(key)
+        elapsed = time.time() - t0
+        if state == "failed" or elapsed > _BODY_WAIT_MAX:
+            reason = ("preload failed" if state == "failed"
+                      else f"cho file qua {_BODY_WAIT_MAX}s")
+            sys.stderr.write(
+                f"[music] {reason} -> live pipe fallback key={key}\n")
+            sys.stderr.flush()
+            try:
+                entry = _resolve(key, title)  # URL moi nhat cho fallback
+            except Exception:
+                pass  # giu entry lay luc route
+            yield from _ffmpeg_chunks(entry["direct_url"],
+                                      entry.get("http_headers"))
+            return
+        if not silence and not silence_err:
+            try:
+                silence = _ensure_silence()
+            except Exception as e:  # noqa: BLE001 - primer loi khong chet
+                silence_err = True
+                sys.stderr.write(f"[music] silence primer loi: {e}\n")
+                sys.stderr.flush()
+                time.sleep(1.0)
+                continue
+        if not silence:
+            time.sleep(0.5)  # khong co gi de gui -> chi doi state/thoi gian
+            continue
+        n = min(8 * 1024, len(silence) - off)
+        if n <= 0:
+            off = 0
+            continue
+        primed = True
+        yield silence[off:off + n]
+        off = (off + n) % len(silence)
+        # Pace ~realtime: neu gap hon toc do robot phat thi backlog im bi
+        # gom trong buffer va robot phai nghe no TRUOC bai that sau khi switch.
+        time.sleep(n / _PRIMER_PACE)
+
+
 @stream_app.get("/stream/{key}.mp3")
 def stream(key: str):
+    # File da co tren dia -> phuc vu ngay (Content-Length, khong can resolve).
+    # Con song duoc sau khi Render restart: _titles mat nhung file con lai.
+    if _size_of(_final_path(key)) > 0:
+        return FileResponse(_final_path(key), media_type="audio/mpeg")
     with _lock:
         title = _titles.get(key)
     if not title:
@@ -594,8 +972,9 @@ def stream(key: str):
         entry = _resolve(key, title)
     except Exception as e:
         raise HTTPException(502, f"resolve thất bại: {e}")
+    _preload_start(key, title)  # idempotent: chay truoc/doi primer o duoi
     return StreamingResponse(
-        _ffmpeg_chunks(entry["direct_url"], entry.get("http_headers")),
+        _stream_body(key, title, entry),
         media_type="audio/mpeg",
         headers={"Content-Type": "audio/mpeg"})
 
@@ -609,6 +988,12 @@ async def health(request: Request) -> JSONResponse:
         "ok": True,
         "cookies": bool(COOKIES_FILE),
         "proxy": bool(YTDLP_PROXY),
+        "cache": {
+            "dir": MEDIA_DIR,
+            "files": _count_cache_files(),
+            "preload_running": sum(
+                1 for v in _preload.values() if v.get("state") == "running"),
+        },
         "audio": {
             "sample_rate": AUDIO_SAMPLE_RATE,
             "channels": AUDIO_CHANNELS,
@@ -632,6 +1017,33 @@ mcp._custom_starlette_routes.append(Mount("/", app=stream_app))
 _titles = {}     # key -> title do get_song_url đăng ký
 _resolved = {}   # key -> {"direct_url":..., "title":..., "expires": float}
 _lock = threading.Lock()
+# Preload truoc bai hat ve dia (xem _preload_worker): key -> {state, err, ...}
+_preload = {}
+# Dia luu cache (Render: ephemeral disk ~1GB; prune giu _CACHE_MAX_FILES bai).
+MEDIA_DIR = os.environ.get("MUSIC_CACHE_DIR") or os.path.join(
+    tempfile.gettempdir(), "zing-music")
+os.makedirs(MEDIA_DIR, exist_ok=True)
+_CACHE_MAX_FILES = int(os.environ.get("MUSIC_CACHE_MAX_FILES", "20"))
+_DL_DEADLINE = 180      # gioi han tai source (giay)
+_XCODE_DEADLINE = 300   # gioi han transcode local (giay)
+_BODY_WAIT_MAX = 240    # stream body doi file toi da (giay) truoc fallback
+_CHUNK_BYTES = 1024 * 1024   # moi phien Range 1 MB (resume duoc giua chung)
+_DL_ATTEMPTS = 4        # retry moi chunk khi dong ket noi som
+
+
+def _primer_pace() -> int:
+    """Toi da byte/s cho silence primer = dung toc do phat (~bitrate/8).
+    Nhanh hon toc do robot phat thi backlog im nam trong kernel buffer ->
+    sau khi file xong, robot con phai nghe het backlog truoc bai THAT."""
+    b = str(AUDIO_BITRATE).strip().lower()
+    try:
+        bits = float(b[:-1]) * 1000 if b.endswith("k") else float(b)
+    except ValueError:
+        bits = 160000.0
+    return max(8000, int(bits / 8 * 1.05))
+
+
+_PRIMER_PACE = _primer_pace()
 _RESOLVE_TTL = 30 * 60  # direct URL googlevideo dùng lại tối đa 30 phút
 
 
@@ -667,12 +1079,14 @@ def search_song(keyword: str) -> str:
 def get_song_url(title: str) -> str:
     """Chuẩn bị một bài hát để robot phát. Trả về NGAY {"status": "ready",
     "stream_url": "..."} — robot gọi self.music.play(stream_url) với URL này.
-    Không cần chờ hay gọi lại: việc tải/convert diễn ra khi robot mở URL."""
+    Không cần chờ hay gọi lại: tải/convert chạy NGAY phía sau; robot mở URL
+    là phát liền (file đã cache sẵn hoặc nhận dần qua silence primer)."""
     key = _key_of(title)
     with _lock:
         _titles[key] = title.strip()
-    # Warm up the direct URL in the background so the robot's first GET is fast.
-    _preresolve_bg(key, title.strip())
+    # Pre-resolve + tai truoc + transcode nen (neu chua chay), de robot mo
+    # /stream la co file san — khong con stream pipe song dong bi dut giua chung.
+    _preload_start(key, title.strip())
     return json.dumps({
         "status": "ready",
         "id": key,
@@ -692,6 +1106,8 @@ if __name__ == "__main__":
             f"[music] audio: {AUDIO_SAMPLE_RATE} Hz x{AUDIO_CHANNELS}, "
             f"{AUDIO_BITRATE} mp3, preset={AUDIO_PRESET}\n")
         sys.stderr.write(f"[music] filters: {AUDIO_FILTERS or '(none)'}\n")
+        sys.stderr.write(
+            f"[music] cache: {MEDIA_DIR} (max {_CACHE_MAX_FILES} bai)\n")
         sys.stderr.flush()
         if MCP_TRANSPORT == "stdio":
             # Chế độ cũ: MCP stdio (qua mcp_pipe.py) + HTTP stream chạy nền.
