@@ -391,8 +391,11 @@ def _resolve(key: str, title: str) -> dict:
                 info = ydl.extract_info(title, download=False)
             break
         except yt_dlp.utils.DownloadError as e:
-            if "not a bot" in str(e) or "Sign in to confirm" in str(e):
-                # Bot-check (datacenter IP): do NOT raise here — fall through
+            if ("not a bot" in str(e) or "Sign in to confirm" in str(e)
+                    or "needs to be reloaded" in str(e)):
+                # Bot-check (datacenter IP) hoac tv_downgraded UNPLAYABLE
+                # (yt-dlp #17389: default client khi cookies dang nhap):
+                # do NOT raise here — fall through
                 # to the player_client=[android,ios,tv] fallback below (it
                 # does not need web-sig/PO-token) instead of dying at tier 1.
                 last_err = e
