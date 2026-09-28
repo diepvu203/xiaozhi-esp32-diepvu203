@@ -17,8 +17,9 @@ services:
         value: stdio
       - key: MCP_ENDPOINT
         sync: false
-      # YouTube anti-bot: base64 cua cookies.txt (trinh duy dang nhap YouTube).
-      # IP datacenter bi chan "Sign in to confirm you're not a bot".
+      # YouTube anti-bot (phuong an DU PHONG): base64 cua cookies.txt.
+      # mac dinh da co PO token (bgutil, xem README) -> CO THE XOA bien nay
+      # sau khi verify; giu lai cung khong sao nhung cookies bi revoke nhanh.
       - key: YTDLP_COOKIES_B64
         sync: false
       # Proxy tuy chon neu co (vd http://user:pass@host:port).

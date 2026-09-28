@@ -5,3 +5,6 @@ websockets
 python-dotenv
 fastapi
 uvicorn
+# PO token provider cho yt-dlp (vuot YouTube bot-check khong can cookies).
+# Version PHAI khop BGUTIL_VERSION trong Dockerfile (server /ping check).
+bgutil-ytdlp-pot-provider==2.0.0

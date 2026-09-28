@@ -137,7 +137,38 @@ IP datacenter của Render bị YouTube gắn cờ → bước `_resolve` (lấy
 thất bại, log thấy đúng câu lỗi này. `search_song` vẫn chạy (extract_flat
 không bị check) nên robot "tìm được bài nhưng không phát được".
 
-Sửa bằng cookies (cách chính thức yt-dlp khuyến nghị):
+### Giải pháp lâu dài (đã tích hợp): PO token — không cần export cookies
+
+**Tại sao cookies "chỉ hát được vài bài rồi chết":** Google revoke session
+ngay khi cookies bị dùng từ IP **không cố định** (proxy xoay IP) hoặc IP
+datacenter bị gắn cờ — không phải cookies "hết hạn theo tuổi". Export lại
+liên tục chỉ là chữa triệu chứng.
+
+Dockerfile đã tích hợp **bgutil PO-token provider** — cơ chế chính thức của
+yt-dlp để vượt "Sign in to confirm you're not a bot" *không cần cookies*:
+
+- `requirements.txt` cài plugin pip `bgutil-ytdlp-pot-provider==2.0.0`
+  (yt-dlp tự discover provider `bgutil:http`, không cần cấu hình).
+- `start.sh` boot server POT chạy nền của bgutil tại `127.0.0.1:4416`
+  (dùng deno — đã có sẵn trong image), **trước** khi `mcp_pipe` chạy.
+- Plugin tự gắn PO token vào request resolve; nếu server POT chết thì
+  yt-dlp chỉ log warning và chạy như cũ (không crash service).
+
+Kiểm tra sau deploy (Render log):
+
+1. Boot: `[music] bgutil PO-token plugin 2.0.0 OK -> ...` và
+   `[start] bgutil POT server ready (pid ...)`.
+2. Thử hát **liên tiếp nhiều bài** — không còn lỗi
+   "Sign in to confirm you're not a bot".
+3. Khi POT đã hoạt động ổn định: **xóa `YTDLP_COOKIES_B64`** trên Render
+   (Environment → Remove → Save) để khỏi phải export cookies mỗi ngày.
+   Để lại cookies cũng được, nhưng không còn bắt buộc.
+
+Nếu VẪN còn lỗi bot-check dù đã có POT → IP proxy mới là thủ phạm: xoay
+proxy mới (nên dùng loại **sticky/residential** — IP cố định) hoặc tạm xóa
+`YTDLP_PROXY` để test từng biến một.
+
+Sửa bằng cookies (phương án dự phòng, khi PO token chưa dùng được):
 
 1. **Export cookies** từ máy đang đăng nhập YouTube (chọn 1 cách):
    - Extension **"Get cookies.txt LOCALLY"** (Chrome/Edge/Firefox) → mở
@@ -176,7 +207,8 @@ Sửa bằng cookies (cách chính thức yt-dlp khuyến nghị):
    đã decode **VÀ** validate qua Netscape header (file hỏng → server từ chối
    và trả `"cookies": false`, lý do chi tiết nằm trong log Render: dòng
    `YTDLP_COOKIES_B64 rejected: ...`). Rồi thử yêu cầu hát.
-6. Cookies hết hạn / YouTube xoay session → export lại + cập nhật env.
+6. Cookies hết hạn / YouTube xoay session → export lại + cập nhật env
+   (bỏ qua bước này nếu đã dùng PO token ở trên).
 
 Phương án phụ: có proxy IP sạch thì set `YTDLP_PROXY=http://user:pass@host:port`
 trên dashboard (không cần cookies).

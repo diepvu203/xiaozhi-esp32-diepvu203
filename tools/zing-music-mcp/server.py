@@ -174,13 +174,8 @@ else:
 #   YTDLP_PROXY       — proxy tùy chọn, vd http://user:pass@host:port.
 COOKIES_FILE = None
 _cookies_b64 = os.environ.get("YTDLP_COOKIES_B64", "").strip()
-if not _cookies_b64:
-    # Truoc day env rong -> im lang, kho cham doan (health cookies=false nhung
-    # log boot khong co dong nao). Danh dau ro rang cho Render log:
-    sys.stderr.write(
-        "[music] WARNING: YTDLP_COOKIES_B64 not set — YouTube bot-check se "
-        "chan; xem README de dat cookies (health se hien cookies=false)\n")
-    sys.stderr.flush()
+# (Thieu cookies -> khong warn o day vi chua biet POT_AVAILABLE; dong canh bao
+# duoc in SAU block bgutil PO-token duoi day khi da ro ca hai nguon auth.)
 if _cookies_b64:
     try:
         # Decode -> bytes THÔ rồi ghi binary ("wb") — tuyệt đối KHÔNG
@@ -226,6 +221,35 @@ if _cookies_b64:
         COOKIES_FILE = None
         sys.stderr.write(f"[music] YTDLP_COOKIES_B64 rejected: {e}\n")
         sys.stderr.flush()
+
+# ---------------------------------------------------------------------------
+# bgutil PO-token provider — giải pháp lâu dài cho bot-check: plugin pip
+# đăng ký provider bgutil:http với yt-dlp; start.sh boot server POT chạy
+# nền tại 127.0.0.1:4416. Với PO token thì cookies chỉ là phương án dự
+# phòng (không còn phải export lại khi Google revoke session).
+# ---------------------------------------------------------------------------
+POT_AVAILABLE = False
+try:
+    from importlib import metadata as _plg_md
+    _pot_v = _plg_md.version("bgutil-ytdlp-pot-provider")
+    POT_AVAILABLE = True
+    sys.stderr.write(
+        f"[music] bgutil PO-token plugin {_pot_v} OK -> yt-dlp lay PO token "
+        "tu http://127.0.0.1:4416 (start.sh)\n")
+except Exception:
+    sys.stderr.write(
+        "[music] WARNING: bgutil PO-token plugin chua cai — khong co PO token, "
+        "IP datacenter van bi bot-check (xem requirements.txt)\n")
+sys.stderr.flush()
+
+if not _cookies_b64 and not POT_AVAILABLE:
+    # Khong co cookies VA khong co PO token -> bot-check chac chan chan;
+    # thieu mot trong hai thi nguon kia (POT hoac cookies) dam nhan.
+    sys.stderr.write(
+        "[music] WARNING: YTDLP_COOKIES_B64 not set VA khong co PO token — "
+        "YouTube bot-check se chan (xem README: cai bgutil hoac dat "
+        "cookies; /health hien cookies=false, pot=false)\n")
+    sys.stderr.flush()
 
 YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
 
@@ -462,13 +486,39 @@ def _resolve(key: str, title: str) -> dict:
             sys.stderr.write(
                 f"[music] resolve give-up '{title}': cookies="
                 f"{'on' if COOKIES_FILE else 'off'}, proxy="
-                f"{'on' if YTDLP_PROXY else 'off'}, last={last_err}\n")
+                f"{'on' if YTDLP_PROXY else 'off'}, "
+                f"pot={'on' if POT_AVAILABLE else 'off'}, last={last_err}\n")
+            _hint = ""
+            if last_err is not None and any(
+                    s in str(last_err)
+                    for s in ("not a bot", "Sign in to confirm")):
+                # Bot-check that survived BOTH tier-1 and player_client
+                # fallback = session/IP problem, khong phai format problem.
+                if POT_AVAILABLE:
+                    # PO token đã cài mà vẫn bị → IP/proxy là thủ phạm.
+                    _hint = (
+                        " -> PO token (bgutil) đã cài nhưng vẫn bị bot-check: "
+                        "IP proxy bị flag — xoay proxy mới (nên sticky/"
+                        "residential) hoặc tạm xóa YTDLP_PROXY để test "
+                        "(xem README)")
+                elif COOKIES_FILE:
+                    _hint = (
+                        " -> cookie YouTube hết hạn/bị revoke: export lại "
+                        "cookies.txt rồi cập nhật env YTDLP_COOKIES_B64 "
+                        "trên Render (xem README)")
+                else:
+                    _hint = (
+                        " -> chưa có PO token/cookies: cài bgutil plugin "
+                        "(requirements.txt) hoặc đặt env YTDLP_COOKIES_B64 "
+                        "(xem README)")
             raise RuntimeError(
                 f"không lấy được format nào cho '{title}' "
                 f"(formats={n_formats}, "
                 f"deno={'yes' if shutil.which('deno') else 'NO'}, "
                 f"cookies={'on' if COOKIES_FILE else 'off'}, "
-                f"proxy={'on' if YTDLP_PROXY else 'off'}): {last_err}")
+                f"proxy={'on' if YTDLP_PROXY else 'off'}, "
+                f"pot={'on' if POT_AVAILABLE else 'off'}): "
+                f"{last_err}{_hint}")
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
     if not direct:
@@ -987,6 +1037,7 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,
         "cookies": bool(COOKIES_FILE),
+        "pot": POT_AVAILABLE,
         "proxy": bool(YTDLP_PROXY),
         "cache": {
             "dir": MEDIA_DIR,
