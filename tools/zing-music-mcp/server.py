@@ -168,6 +168,13 @@ else:
 #   YTDLP_PROXY       — proxy tùy chọn, vd http://user:pass@host:port.
 COOKIES_FILE = None
 _cookies_b64 = os.environ.get("YTDLP_COOKIES_B64", "").strip()
+if not _cookies_b64:
+    # Truoc day env rong -> im lang, kho cham doan (health cookies=false nhung
+    # log boot khong co dong nao). Danh dau ro rang cho Render log:
+    sys.stderr.write(
+        "[music] WARNING: YTDLP_COOKIES_B64 not set — YouTube bot-check se "
+        "chan; xem README de dat cookies (health se hien cookies=false)\n")
+    sys.stderr.flush()
 if _cookies_b64:
     try:
         # Decode -> bytes THÔ rồi ghi binary ("wb") — tuyệt đối KHÔNG
