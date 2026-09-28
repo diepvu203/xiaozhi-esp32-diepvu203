@@ -199,9 +199,22 @@ if _cookies_b64:
         COOKIES_FILE = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
         with open(COOKIES_FILE, "wb") as _f:
             _f.write(_data)
+        _auth_names = (
+            "SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO",
+            "__Secure-1PSID", "__Secure-3PSID", "__Secure-3PAPISID")
+        _auth = set()
+        for _line in _data.decode("utf-8", "replace").splitlines():
+            _c = _line.split("\t")
+            if len(_c) >= 7 and _c[5] in _auth_names:
+                _auth.add(_c[5])
         sys.stderr.write(
-            f"[music] cookies: Netscape OK ({len(_data)} bytes) -> "
-            f"{COOKIES_FILE}\n")
+            f"[music] cookies: Netscape OK ({len(_data)} bytes, "
+            f"{len(_auth)}/9 auth) -> {COOKIES_FILE}\n")
+        if not _auth:
+            sys.stderr.write(
+                "[music] WARNING: cookies khong co auth cookie "
+                "(SID/SAPISID/LOGIN_INFO) - export khi chua dang nhap "
+                "YouTube? Se van bi bot-check/reload.\n")
         sys.stderr.flush()
     except Exception as e:
         COOKIES_FILE = None
@@ -406,17 +419,27 @@ def _resolve(key: str, title: str) -> dict:
     if info is None:
         # Chẩn đoán (stderr): extract KHÔNG selector để đếm formats;
         # no_warnings=False để lộ cảnh báo EJS/JS-runtime thường bị ẩn.
-        diag_opts = dict(base_opts)
-        diag_opts["no_warnings"] = False
-        _apply_ydl_auth(diag_opts)
         n_formats = -1
         diag = None
-        try:
-            with yt_dlp.YoutubeDL(diag_opts) as ydl:
-                diag = ydl.extract_info(title, download=False)
-            n_formats = len(diag.get("formats") or [])
-        except Exception as de:  # noqa: BLE001 - chẩn đoán
-            sys.stderr.write(f"[music] diag extract: {de}\n")
+        # Loi client-level (bot-check / "needs to be reloaded" - tv_downgraded
+        # UNPLAYABLE, yt-dlp #17389): default client se trung loi nay -> skip
+        # diag (chi tach thoi gian) va di thang player_client fallback.
+        _client_level = last_err is not None and any(
+            s in str(last_err) for s in (
+                "needs to be reloaded", "not a bot", "Sign in to confirm"))
+        if _client_level:
+            sys.stderr.write(
+                f"[music] skip diag (client-level): {last_err}\n")
+        else:
+            diag_opts = dict(base_opts)
+            diag_opts["no_warnings"] = False
+            _apply_ydl_auth(diag_opts)
+            try:
+                with yt_dlp.YoutubeDL(diag_opts) as ydl:
+                    diag = ydl.extract_info(title, download=False)
+                n_formats = len(diag.get("formats") or [])
+            except Exception as de:  # noqa: BLE001 - chẩn đoán
+                sys.stderr.write(f"[music] diag extract: {de}\n")
         sys.stderr.write(
             f"[music] resolve fail '{title}': formats={n_formats}, "
             f"deno={shutil.which('deno') or 'NOT FOUND'}, "
@@ -430,13 +453,15 @@ def _resolve(key: str, title: str) -> dict:
             cli_opts = dict(base_opts)
             cli_opts["format"] = "bestaudio/best"
             cli_opts["extractor_args"] = {
-                "youtube": {"player_client": ["android", "ios", "tv"]}}
+                "youtube": {"player_client": [
+                    "android", "ios", "tv", "web_embedded"]}}
             _apply_ydl_auth(cli_opts)
             try:
                 with yt_dlp.YoutubeDL(cli_opts) as ydl:
                     info = ydl.extract_info(title, download=False)
                 sys.stderr.write(
-                    "[music] resolved via player_client=android,ios,tv\n")
+                    "[music] resolved via player_client="
+                    "android,ios,tv,web_embedded\n")
             except yt_dlp.utils.DownloadError as e:
                 sys.stderr.write(
                     f"[music] player_client fallback failed "
