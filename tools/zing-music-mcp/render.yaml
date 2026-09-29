@@ -24,11 +24,13 @@ services:
       - key: YTDLP_COOKIES_B64
         sync: false
       # Ladder player client — mac dinh trong server.py da dung: tier default
-      # (visionos+web, co PO token) -> visionos,tv,web_embedded (KHONG can PO
+      # (visionos+web, co PO token) -> tv,web_embedded,tv_downgraded (KHONG can
       # token) -> mweb,tv_simply,web -> android_vr,android,ios. Chi set khi muon
       # khoa 1 nhom cu the, vd de loai han bien PO token:
-      #   YTDLP_PLAYER_CLIENTS='|visionos,tv,web_embedded'
+      #   YTDLP_PLAYER_CLIENTS='|tv,web_embedded,tv_downgraded'
       # YTDLP_DEBUG=1 -> in ca message [debug] cua yt-dlp (mac dinh info/warn/err).
+      # YTDLP_FORMAT_PROBE=0 -> tat buoc thu tai 64 KB tu direct URL truoc khi
+      # coi resolve thanh cong (mac dinh bat).
       # Proxy tuy chon neu co (vd http://user:pass@host:port).
       - key: YTDLP_PROXY
         sync: false

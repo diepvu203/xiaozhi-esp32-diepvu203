@@ -42,8 +42,9 @@ trực tiếp (hành vi cũ, giảm cấp).
 | `MUSIC_CACHE_MAX_FILES` | Số bài giữ trong cache (mỗi bài ~1–12 MB). Mặc định `20` |
 | `YTDLP_COOKIES_B64` | base64 của `cookies.txt` (Netscape) cho yt-dlp — phương án khi PO token chưa đủ. Xem mục bot-check |
 | `YTDLP_PROXY` | Proxy cho yt-dlp + bước tải source (nên **sticky/residential**, không xoay IP liên tục) |
-| `YTDLP_PLAYER_CLIENTS` | Ladder player client: tier cách nhau `\|`, client trong tier cách nhau `,`, tier rỗng = client mặc định của yt-dlp. Mặc định `\|visionos,tv,web_embedded\|mweb,tv_simply,web\|android_vr,android,ios` |
+| `YTDLP_PLAYER_CLIENTS` | Ladder player client: tier cách nhau `\|`, client trong tier cách nhau `,`, tier rỗng = client mặc định của yt-dlp. Mặc định `\|tv,web_embedded,tv_downgraded\|mweb,tv_simply,web\|android_vr,android,ios` (tier đầu để rỗng = yt-dlp tự chọn client) |
 | `YTDLP_DEBUG` | `1` = in cả message `[debug]` của yt-dlp (mặc định chỉ info/warn/err) |
+| `YTDLP_FORMAT_PROBE` | `0` = tắt bước thử tải 64 KB từ direct URL trước khi coi resolve thành công (mặc định `1`). Giữ bật để robot không nghe silence primer chỉ vì URL 403 |
 
 Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi khởi động để bạn biết cấu hình đang chạy.
 
@@ -62,6 +63,11 @@ Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi kh�
   transcode C, cycle n, client=...)` — **chia thời gian theo công đoạn**:
   dùng số này để biết nút thắt nằm ở mạng (resolve/tải) hay CPU (transcode)
   thay vì tối ưu nhầm chỗ.
+- `[music] format probe OK (206, 4096 B, 0.3s)` / `format probe HTTP 403` —
+  bước thử tải 64 KB từ direct URL sau khi resolve. URL không tải được thì
+  tier đó bị bỏ (`tier '...' cho URL khong tai duoc -> thu tier ke tiep`) và
+  thử tier client kế tiếp — nhờ vậy robot không rơi vào cảnh chỉ nghe
+  silence primer rồi im.
 - Chạy `python verify_resolve_ladder.py` để test lại ladder + route
   (offline, không cần mạng).
 
@@ -205,7 +211,7 @@ Nếu VẪN còn lỗi bot-check dù đã có POT → đọc trường `pot_srv=
   1. **Xóa `YTDLP_COOKIES_B64`** rồi test — session cookies bị revoke có
      thể gây hard-block "Sign in" ngay cả khi đã có PO token.
   2. Thử nhóm client **không cần PO token**:
-     `YTDLP_PLAYER_CLIENTS='|visionos,tv,web_embedded'`. Nhóm này không đi
+     `YTDLP_PLAYER_CLIENTS='|tv,web_embedded,tv_downgraded'`. Nhóm này không đi
      qua BotGuard nên loại được biến "PO token"; nếu **cả nhóm này cũng
      fail** thì IP datacenter đã bị gắn cờ → cần cookies mới hoặc proxy
      sticky/residential sạch.

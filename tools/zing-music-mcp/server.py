@@ -56,6 +56,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -474,10 +475,12 @@ def _stream_url(key: str) -> str:
 #   visionos / tv / web_embedded -> KHONG can PO token
 #   mweb / tv_simply / web       -> can token web (bgutil sinh duoc)
 #   android_vr / android / ios   -> can token Android/iOS (bgutil KHONG sinh duoc)
-# Nen ladder mac dinh: default (visionos+web, co POT) -> nhom token-free ->
-# nhom web+POT -> nhom android/ios (chi huu ich khi co token/cookies phu hop).
+# Nen ladder mac dinh: tier dau RONG = de yt-dlp tu chon client (voi ban dang pin
+# la visionos+web, co POT) -> nhom token-free -> nhom web+POT -> nhom android/ios
+# (chi huu ich khi co token/cookies phu hop). Cac tier sau KHONG lap lai client
+# da thu o tier truoc (vong lap trong _resolve tu bo).
 _DEFAULT_CLIENT_LADDER = (
-    "|visionos,tv,web_embedded|mweb,tv_simply,web|android_vr,android,ios")
+    "|tv,web_embedded,tv_downgraded|mweb,tv_simply,web|android_vr,android,ios")
 _CLIENT_LEVEL_MARKERS = (
     "not a bot", "Sign in to confirm", "needs to be reloaded",
     "Failed to extract any player response",
@@ -502,6 +505,106 @@ def _is_client_level_err(err) -> bool:
 
 _CLIENT_TIERS = _parse_client_ladder(
     os.environ.get("YTDLP_PLAYER_CLIENTS", _DEFAULT_CLIENT_LADDER))
+
+
+# ---------------------------------------------------------------------------
+# Probe direct URL truoc khi coi resolve la thanh cong
+# ---------------------------------------------------------------------------
+# yt-dlp co the tra ve URL ma googlevideo se 403 khi tai that (format can GVS
+# PO token khong duoc cap, hoac IP bi chan theo tung client). Khong thu thi
+# robot chi nhan duoc silence primer roi im -> dung trieu chung "link chay
+# nhung khong co tieng". Probe bang 1 Range nho, dung headers/proxy nhu luc tai.
+_PROBE_ENABLED = os.environ.get(
+    "YTDLP_FORMAT_PROBE", "1").strip().lower() not in ("0", "false", "no", "off")
+_PROBE_BYTES = 64 * 1024
+_PROBE_TIMEOUT = 15
+_PROBE_REJECT_CODES = (400, 401, 403, 404, 410)
+
+
+def _probe_direct_url(entry: dict) -> bool:
+    """True neu URL tai duoc. Chi ket luan 'khong tai duoc' khi HTTP tra ve
+    _PROBE_REJECT_CODES; loi mang/timeout -> khong ket luan, van dung (tranh
+    loai oan URL chi vi probe chap chon)."""
+    if not _PROBE_ENABLED:
+        return True
+    url = (entry or {}).get("direct_url")
+    if not url:
+        return False
+    headers = dict(entry.get("http_headers") or {})
+    for drop in ("Range", "If-Range", "Content-Length"):
+        headers.pop(drop, None)
+    headers["Accept-Encoding"] = "identity"
+    headers["Range"] = f"bytes=0-{_PROBE_BYTES - 1}"
+    req = urllib.request.Request(url, headers=headers)
+    if YTDLP_PROXY:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(
+            {"http": YTDLP_PROXY, "https": YTDLP_PROXY}))
+    else:
+        opener = urllib.request.build_opener()
+    t0 = time.time()
+    try:
+        with opener.open(req, timeout=_PROBE_TIMEOUT) as r:
+            status = getattr(r, "status", None) or r.getcode()
+            data = r.read(4096)
+        sys.stderr.write(
+            f"[music] format probe OK ({status}, {len(data)} B, "
+            f"{time.time() - t0:.1f}s)\n")
+        sys.stderr.flush()
+        return bool(data)
+    except urllib.error.HTTPError as e:
+        reject = e.code in _PROBE_REJECT_CODES
+        reason = ("URL khong tai duoc" if reject
+                  else "khong ket luan, van dung")
+        sys.stderr.write(f"[music] format probe HTTP {e.code} ({reason})\n")
+        sys.stderr.flush()
+        return not reject
+    except Exception as e:  # noqa: BLE001 - probe khong duoc lam chet resolve
+        sys.stderr.write(
+            f"[music] format probe loi ({e}) -> khong ket luan, van dung\n")
+        sys.stderr.flush()
+        return True
+
+
+def _entry_from_info(title: str, info: dict) -> dict:
+    """Chon format tot nhat tu info cua yt-dlp -> entry (direct_url + headers)."""
+    chosen = info["entries"][0] if "entries" in info else info
+    direct = chosen.get("url")
+    if not direct:
+        with_url = [f for f in (chosen.get("formats") or []) if f.get("url")]
+        # Ưu tiên audio-only: fmts[-1] là cao nhất nhưng có thể là VIDEO-only
+        # (âm thanh im lặng) — chỉ lấy video khi không còn format âm thanh nào.
+        audio_only = [
+            f for f in with_url
+            if f.get("vcodec") in (None, "none")
+            and f.get("acodec") not in (None, "none")]
+        pick = audio_only[-1] if audio_only else (
+            with_url[-1] if with_url else None)
+        if pick is None:
+            raise RuntimeError("không lấy được direct stream URL")
+        direct = pick["url"]
+    # '__yt_dlp_client' = client Innertube đã sinh ra format này (yt-dlp gắn vào
+    # từng format). Có trường hợp format được chọn không mang key này (nhánh
+    # HLS/m3u8) -> lấy thêm danh sách client thấy trong toàn bộ formats.
+    clients_seen = sorted(
+        {f.get("__yt_dlp_client") for f in (info.get("formats") or [])
+         if f.get("__yt_dlp_client")})
+    return {
+        "direct_url": direct,
+        "title": chosen.get("title") or title,
+        "uploader": chosen.get("uploader") or chosen.get("channel"),
+        "duration": chosen.get("duration"),
+        "client": (chosen.get("__yt_dlp_client")
+                   or info.get("__yt_dlp_client")
+                   or (clients_seen[0] if len(clients_seen) == 1 else "")
+                   or "n/a"),
+        "clients_seen": clients_seen,
+        "format_id": chosen.get("format_id") or "",
+        # Headers yt-dlp dùng cho format này (UA android/ios/tv...) — _ffmpeg_chunks
+        # replay để googlevideo không 403.
+        "http_headers": (chosen.get("http_headers")
+                         or info.get("http_headers") or {}),
+        "expires": time.time() + _RESOLVE_TTL,
+    }
 
 
 def _resolve(key: str, title: str) -> dict:
@@ -529,18 +632,25 @@ def _resolve(key: str, title: str) -> dict:
     last_err = None
     won_via = ""
     tried = []
+    entry = None
+    attempted = set()
     # Vòng lặp 2 chiều: tier client (rỗng = client mặc định của yt-dlp) ×
     # format selector. Bot-check / thiếu PO token là lỗi mức CLIENT -> đổi
     # format selector không giúp gì, nhảy ngay sang tier client kế tiếp.
+    # Client đã thử ở tier trước được bỏ để không lặp lại vô ích.
     for clients in _CLIENT_TIERS:
         label = ",".join(clients) if clients else "default"
+        todo = tuple(c for c in clients if c not in attempted)
+        if clients and not todo:
+            continue
+        attempted.update(todo)
         for fmt in _format_tiers:
             opts = dict(base_opts)
             if fmt:
                 opts["format"] = fmt
             if clients:
                 opts["extractor_args"] = {
-                    "youtube": {"player_client": list(clients)}}
+                    "youtube": {"player_client": list(todo)}}
             _apply_ydl_auth(opts)
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
@@ -559,17 +669,43 @@ def _resolve(key: str, title: str) -> dict:
                 if "Requested format is not available" not in str(e):
                     raise  # lỗi khác (unavailable, HTTP...) -> nổi lên ngay
         if info:
-            won_via = label
-            break
+            try:
+                cand = _entry_from_info(title, info)
+            except RuntimeError as e:
+                last_err = e
+                cand = None
+            # URL chưa tải được thật (403...) thì tier này vô dụng: robot chỉ
+            # nghe được silence primer -> thử tier client kế tiếp.
+            if cand is not None and _probe_direct_url(cand):
+                entry = cand
+                won_via = label
+                break
+            if cand is not None:
+                sys.stderr.write(
+                    f"[music] tier '{label}' cho URL khong tai duoc "
+                    f"-> thu tier ke tiep\n")
+                sys.stderr.flush()
+            info = None
         if label not in tried:
             tried.append(label)
-    if info:
+    if entry is not None:
+        if entry.get("client") in ("", "n/a"):
+            # Nhánh HLS/m3u8 không mang '__yt_dlp_client' -> dùng tên tier làm
+            # manh mối client.
+            entry["client"] = won_via
+        with _lock:
+            _resolved[key] = entry
         sys.stderr.write(
             f"[music] resolve OK qua tier '{won_via}' "
             f"(tier đã fail: {', '.join(tried) if tried else 'không'}), "
             f"yt-dlp={yt_dlp.version.__version__}\n")
+        sys.stderr.write(
+            f"[music] resolved '{entry['title']}' (client={entry['client']}, "
+            f"formats_client={entry.get('clients_seen') or 'n/a'}, "
+            f"format_id={entry.get('format_id') or 'n/a'})\n")
         sys.stderr.flush()
-    if info is None:
+        return entry
+    if entry is None:
         _srv = _pot_server_up() if POT_AVAILABLE else False
         sys.stderr.write(
             f"[music] resolve give-up '{title}': cookies="
@@ -621,55 +757,6 @@ def _resolve(key: str, title: str) -> dict:
             f"pot={'on' if POT_AVAILABLE else 'off'}, "
             f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}): "
             f"{last_err}{_hint}")
-    chosen = info["entries"][0] if "entries" in info else info
-    direct = chosen.get("url")
-    if not direct:
-        with_url = [f for f in (chosen.get("formats") or []) if f.get("url")]
-        # Ưu tiên audio-only: fmts[-1] là cao nhất nhưng có thể là VIDEO-only
-        # (âm thanh im lặng) — chỉ lấy video khi không còn format âm thanh nào.
-        audio_only = [
-            f for f in with_url
-            if f.get("vcodec") in (None, "none")
-            and f.get("acodec") not in (None, "none")]
-        pick = audio_only[-1] if audio_only else (
-            with_url[-1] if with_url else None)
-        if pick is None:
-            raise RuntimeError("không lấy được direct stream URL")
-        direct = pick["url"]
-    # '__yt_dlp_client' = client Innertube đã sinh ra format này (yt-dlp gắn vào
-    # từng format) -> log lại để biết đường nào thực sự chạy được. Có trường hợp
-    # format được chọn không mang key này (ví dụ nhánh HLS/m3u8) -> lấy thêm danh
-    # sách client thấy trong toàn bộ formats để vẫn có manh mối.
-    clients_seen = sorted(
-        {f.get("__yt_dlp_client") for f in (info.get("formats") or [])
-         if f.get("__yt_dlp_client")})
-    yt_client = (chosen.get("__yt_dlp_client")
-                 or info.get("__yt_dlp_client")
-                 or (clients_seen[0] if len(clients_seen) == 1 else "")
-                 or won_via or "n/a")
-    entry = {
-        "direct_url": direct,
-        "title": chosen.get("title") or title,
-        "uploader": chosen.get("uploader") or chosen.get("channel"),
-        "duration": chosen.get("duration"),
-        "client": yt_client,
-        # Headers yt-dlp dùng cho format này (UA android/ios/tv...) — _ffmpeg_chunks
-        # replay để googlevideo không 403.
-        "http_headers": (chosen.get("http_headers")
-                         or info.get("http_headers") or {}),
-        "expires": time.time() + _RESOLVE_TTL,
-    }
-    with _lock:
-        _resolved[key] = entry
-    sys.stderr.write(
-        f"[music] resolved '{entry['title']}' (client={yt_client}, "
-        f"formats_client={clients_seen or 'n/a'}, "
-        f"format_id={chosen.get('format_id') or 'n/a'}, "
-        f"abr={chosen.get('abr') or 'n/a'})\n")
-    sys.stderr.flush()
-    return entry
-
-
 # ---------------------------------------------------------------------------
 # Unified Server — MCP + HTTP Streaming (gộp chung MỘT Starlette app)
 # ---------------------------------------------------------------------------

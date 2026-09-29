@@ -33,6 +33,8 @@ def check(name, cond, detail=""):
 
 BOT_CHECK = ("ERROR: [youtube] xyz: Sign in to confirm you're not a bot. "
              "Use --cookies-from-browser or --cookies for the authentication.")
+# Tier token-free trong ladder mac dinh (xem _DEFAULT_CLIENT_LADDER).
+TOKEN_FREE_TIER = ["tv", "web_embedded", "tv_downgraded"]
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +46,7 @@ check("parse ladder 'a,b|c|'",
 check("ladder rong -> 1 tier rong (client mac dinh)",
       server._parse_client_ladder("") == ((),))
 check("ladder mac dinh co nhom token-free o tier 2",
-      server._DEFAULT_CLIENT_LADDER.split("|")[1] == "visionos,tv,web_embedded",
+      server._DEFAULT_CLIENT_LADDER.split("|")[1] == "tv,web_embedded,tv_downgraded",
       server._DEFAULT_CLIENT_LADDER)
 
 
@@ -69,7 +71,7 @@ class FakeYDL:
         clients = (self.opts.get("extractor_args") or {}).get(
             "youtube", {}).get("player_client")
         FakeYDL.calls.append(clients)
-        if clients == ["visionos", "tv", "web_embedded"]:
+        if clients == TOKEN_FREE_TIER:
             return {
                 "title": "Fake Song",
                 "url": "https://example.invalid/videoplayback",
@@ -81,11 +83,13 @@ class FakeYDL:
 
 
 real_ydl = yt_dlp.YoutubeDL
+real_probe0 = server._probe_direct_url
+server._probe_direct_url = lambda entry: True  # probe co test rieng o muc 3b
 yt_dlp.YoutubeDL = FakeYDL
 try:
     entry = server._resolve("verifykey1", "fake song")
     check("tier 2 duoc dung sau khi tier 1 bi chan",
-          FakeYDL.calls == [None, ["visionos", "tv", "web_embedded"]],
+          FakeYDL.calls == [None, TOKEN_FREE_TIER],
           f"calls={FakeYDL.calls}")
     check("entry.client lay tu __yt_dlp_client",
           entry.get("client") == "web_embedded", entry.get("client"))
@@ -111,9 +115,69 @@ try:
               f"{len(FakeYDL.calls)}/{len(server._CLIENT_TIERS)}")
 finally:
     yt_dlp.YoutubeDL = real_ydl
+    server._probe_direct_url = real_probe0
     with server._lock:
         server._resolved.pop("verifykey1", None)
         server._resolved.pop("verifykey2", None)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Khong lap client da thu + URL 403 thi bo tier (nguyen nhan robot im)
+# ---------------------------------------------------------------------------
+class Tier3YDL(FakeYDL):
+    """yt-dlp gia: chi tier cuoi ('tv') moi tra ve format."""
+
+    def extract_info(self, title, download=False):
+        clients = (self.opts.get("extractor_args") or {}).get(
+            "youtube", {}).get("player_client")
+        FakeYDL.calls.append(clients)
+        if clients == ["tv"]:
+            return {"title": "Fake Song", "url": "https://example.invalid/x",
+                    "format_id": "251", "abr": 128, "__yt_dlp_client": "tv"}
+        raise yt_dlp.utils.DownloadError(BOT_CHECK)
+
+
+real_tiers = server._CLIENT_TIERS
+real_probe = server._probe_direct_url
+server._CLIENT_TIERS = server._parse_client_ladder("|visionos|visionos,tv")
+yt_dlp.YoutubeDL = Tier3YDL
+server._probe_direct_url = lambda entry: True
+FakeYDL.calls = []
+try:
+    server._resolve("verifykey4", "fake song 4")
+    check("tier sau khong lap client da thu (visionos chi thu 1 lan)",
+          FakeYDL.calls == [None, ["visionos"], ["tv"]], f"calls={FakeYDL.calls}")
+finally:
+    server._CLIENT_TIERS = real_tiers
+    with server._lock:
+        server._resolved.pop("verifykey4", None)
+
+
+class OkYDL(FakeYDL):
+    """yt-dlp gia: moi tier deu tra format, de test buoc probe."""
+
+    def extract_info(self, title, download=False):
+        FakeYDL.calls.append((self.opts.get("extractor_args") or {}).get(
+            "youtube", {}).get("player_client"))
+        return {"title": "Fake Song", "url": "https://example.invalid/x",
+                "format_id": "251", "abr": 128, "__yt_dlp_client": "tv"}
+
+
+yt_dlp.YoutubeDL = OkYDL
+server._probe_direct_url = lambda entry: False
+try:
+    try:
+        server._resolve("verifykey5", "fake song 5")
+        check("tier cho URL 403 -> bi bo, khong tra URL chet", False,
+              "khong raise")
+    except RuntimeError as e:
+        check("tier cho URL 403 -> bi bo, khong tra URL chet",
+              "tier_da_thu" in str(e), str(e)[:70])
+finally:
+    server._probe_direct_url = real_probe
+    yt_dlp.YoutubeDL = real_ydl
+    with server._lock:
+        server._resolved.pop("verifykey5", None)
 
 
 # ---------------------------------------------------------------------------
