@@ -436,6 +436,133 @@ finally:
         pass
 
 
+# ---------------------------------------------------------------------------
+# 8. Single-flight phai chan ca "encoding", khong chi "running"
+# Bug that do chinh thay doi streaming: robot goi get_song_url (spawn worker)
+# roi GET /stream (goi _preload_start lan nua). Worker 1 da chuyen sang
+# "encoding" (sau khi tai source) thi lan goi 2 KHONG bi chan -> spawn worker 2
+# cho cung key. Hai worker cung chay ffmpeg vao MOT file .part -> robot nhan
+# audio hong, va log in trung "chunked OK"/"primer->encode switch".
+# ---------------------------------------------------------------------------
+_real_worker = server._preload_worker
+spawned = []
+
+
+def _fake_worker(key, title):
+    spawned.append(key)
+
+
+server._preload_worker = _fake_worker
+key_sf = "sfkey1"
+try:
+    for st in ("running", server._PRELOAD_ENCODING):
+        spawned.clear()
+        with server._lock:
+            server._preload[key_sf] = {"state": st, "t0": 0, "err": ""}
+        server._preload_start(key_sf, "t")
+        check(f"single-flight: state='{st}' -> khong spawn worker trung",
+              spawned == [], f"spawned={spawned}")
+
+    # State "ready" + file ton tai -> cung khong spawn (bai da xong).
+    spawned.clear()
+    with open(server._final_path(key_sf), "wb") as f:
+        f.write(b"x" * 200000)
+    with server._lock:
+        server._preload[key_sf] = {"state": "ready", "t0": 0, "err": ""}
+    server._preload_start(key_sf, "t")
+    check("single-flight: state='ready' + file co -> khong spawn lai",
+          spawned == [], f"spawned={spawned}")
+
+    # State "failed" -> cho phep thu lai.
+    spawned.clear()
+    with server._lock:
+        server._preload[key_sf] = {"state": "failed", "t0": 0, "err": "x"}
+    server._preload_start(key_sf, "t")
+    check("single-flight: state='failed' -> spawn lai de thu",
+          spawned == [key_sf], f"spawned={spawned}")
+finally:
+    server._preload_worker = _real_worker
+    with server._lock:
+        server._preload.pop(key_sf, None)
+    try:
+        os.remove(server._final_path(key_sf))
+    except OSError:
+        pass
+
+# _prune_busy phai gom ca "encoding" (nếu khong se xoa .part dang robot nghe)
+with server._lock:
+    server._preload["busykey"] = {"state": server._PRELOAD_ENCODING,
+                                 "t0": 0, "err": ""}
+try:
+    check("_preload_busy: 'encoding' duoc coi la dang chay",
+          server._preload_busy("busykey"))
+finally:
+    with server._lock:
+        server._preload.pop("busykey", None)
+check("_preload_busy: 'ready' khong con chay",
+      not server._preload_busy("nosuchkey"))
+
+
+# ---------------------------------------------------------------------------
+# 9. Prefetch: khoá "mot viec nen" phai mo lai sau khi worker xong
+# Bug that: _preload_state_update ghi prefetch=True, neu khong xoa khi ket
+# thuc (ready/failed) thi khoá kẹt vinh vien -> chi bai dau tien duoc tai
+# truoc, tu bai thu hai tro di lai phai doi 26s transcode.
+# ---------------------------------------------------------------------------
+_spawned9 = []
+server._preload_worker = lambda k, t: _spawned9.append(k)
+try:
+    # _maybe_prefetch TỰ hash title thành key (_key_of) — test phải dùng key
+    # đó, không tự đặt key tùy ý (lần trước test sai chỗ này).
+    _pf = server._key_of("pfkey1")
+    with server._lock:
+        server._preload.pop(_pf, None)
+    server._maybe_prefetch([{"title": "pfkey1"}], "pfkey1")
+    rec = (server._preload.get(_pf) or {})
+    check("prefetch: bai khop tuyet doi -> spawn worker nen",
+          _spawned9 == [_pf] and rec.get("prefetch") is True,
+          f"spawned={_spawned9} rec={rec.get('prefetch')}")
+    check("prefetch: state ban dau = running",
+          rec.get("state") == "running", str(rec.get("state")))
+
+    # Worker xong -> khoa phai mo, bai sau moi prefetch duoc.
+    server._preload_state_update(_pf, state="ready", err="")
+    check("prefetch: 'ready' xoa co khoa",
+          not (server._preload.get(_pf) or {}).get("prefetch"),
+          str((server._preload.get(_pf) or {}).get("prefetch")))
+
+    # Worker that bai cung phai mo khoa (khong de bi khop roi vinh vien).
+    with server._lock:
+        server._preload.pop(_pf, None)
+    _spawned9.clear()
+    server._maybe_prefetch([{"title": "pfkey1"}], "pfkey1")
+    server._preload_state_update(_pf, state="failed", err="x")
+    check("prefetch: 'failed' cung xoa co khoa",
+          not (server._preload.get(_pf) or {}).get("prefetch"))
+
+    # Bai dang chay -> khong prefetch trung (tranh 2 worker cung ghi .part).
+    _spawned9.clear()
+    with server._lock:
+        server._preload.pop(_pf, None)
+        server._preload[_pf] = {"state": "running", "t0": 0, "err": "",
+                                "prefetch": True}
+    server._maybe_prefetch([{"title": "pfkey1"}], "pfkey1")
+    check("prefetch: bai dang chay -> khong spawn worker thu hai",
+          _spawned9 == [], f"spawned={_spawned9}")
+
+    # Ten khong khop -> khong prefetch (tranh tai nham bai 5 MB).
+    _spawned9.clear()
+    with server._lock:
+        server._preload.pop(_pf, None)
+    server._maybe_prefetch([{"title": "mot bai hoan toan khac"}], "pfkey1")
+    check("prefetch: ten khong khop -> khong tai truong",
+          _spawned9 == [], f"spawned={_spawned9}")
+finally:
+    server._preload_worker = _real_worker
+    with server._lock:
+        server._preload.pop(server._key_of("pfkey1"), None)
+
+
 print()
 if FAILED:
     print(f"THAT BAI {len(FAILED)}: {', '.join(FAILED)}")

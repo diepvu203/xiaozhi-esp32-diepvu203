@@ -741,6 +741,16 @@ RESOLVE_CANDIDATES = max(1, int(os.environ.get("YTDLP_RESOLVE_CANDIDATES", "2"))
 # khi IP da bi chan thi doi lan tiep cung that. Source nao giu duoc thi thu
 # lai; dat 0 de tat cooldown (moi request deu thu lai).
 SOURCE_COOLDOWN = max(0, int(os.environ.get("YTDLP_SOURCE_COOLDOWN", "900")))
+
+# Prefetch: search vừa tìm ra bài khớp tuyệt đối thì tải luôn trong lúc agent
+# còn đang suy nghĩ/chờ -> lúc robot phát, file đã có sẵn, độ trễ về 0.
+# BẬT MẶC ĐỊNH: băng thông/dĩa Render free chịu được, và độ trễ là thứ user
+# cảm nhận trực tiếp. Tắt bằng MUSIC_PREFETCH=0 nếu muốn tiết kiệm.
+PREFETCH = os.environ.get("MUSIC_PREFETCH", "1").strip().lower() not in (
+    "0", "false", "no", "off")
+# Ngưỡng khớp tên để prefetch: Dice score. 0.9 = phải gần như trùng tên bài
+# (sai thì thành tải nhầm + tốn băng thông vô ích).
+_PREFETCH_MIN_SCORE = 0.9
 _source_fail_until = {}
 _src_lock = threading.Lock()
 
@@ -1159,7 +1169,14 @@ def _preload_state(key: str) -> str:
 
 def _preload_state_update(key: str, **fields) -> None:
     with _lock:
-        _preload.setdefault(key, {}).update(fields)
+        rec = _preload.setdefault(key, {})
+        rec.update(fields)
+        # Cờ prefetch chỉ tồn tại để "một việc nền" dùng làm khoá. Khi
+        # worker kết thúc (kể cả failed) mà quên xoá, khoá đó kẹt vĩnh viễn
+        # và mọi prefetch sau đều bị bỏ qua -> sau bài đầu tiên thì hết tải
+        # trước. Xoá ở đây để mọi đường thoát đều tự dọn.
+        if fields.get("state") in ("ready", "failed"):
+            rec["prefetch"] = False
 
 
 # Trạng thái preload giữa các mốc:
@@ -1398,6 +1415,11 @@ def _preload_worker(key: str, title: str) -> None:
     err = None
     for cycle in range(2):
         try:
+            # Chuyen ve "running" o DAU moi chu ky, khong giu "encoding" cua
+            # chu ky truoc: vua xoa .part (dong 1410) nen reader theo file do
+            # se doc trong file rong / file dang bi xoa. "running" bao cho
+            # _stream_body quay lai gui silence primer cho an toan.
+            _preload_state_update(key, state="running")
             if cycle:
                 with _lock:
                     _resolved.pop(key, None)  # buoc resolve URL moi
@@ -1475,10 +1497,19 @@ def _preload_worker(key: str, title: str) -> None:
 
 def _preload_start(key: str, title: str) -> None:
     """Khoi tai/preload bai (single-flight). Goi tu get_song_url (truoc khi
-    robot GET) va tu route /stream (neu get_song_url chua run)."""
+    robot GET) va tu route /stream (neu get_song_url chua run).
+
+    Phai kiem tra `_preload_busy` (ca "running" LAN "encoding"), KHONG chi
+    "running": robot goi get_song_url (spawn worker 1) roi GET /stream
+    (goi lai ham nay). Neu chi so "running", luc worker 1 da chuyen sang
+    "encoding" (sau khi tai xong source) thi lan goi thu hai KHONG bi chan
+    -> spawn worker 2 cho cung key. Hai worker cung tai va cung chay ffmpeg
+    vao MOT file .part: robot nhan audio hong (hai encoder ghi lech offset
+    giua nhau) + bang thong 2 lan. Do la nguyen nhan log in trung
+    "chunked OK ..." va "primer->encode switch ..." hai lan."""
     with _lock:
         st = (_preload.get(key) or {}).get("state")
-        if st == "running":
+        if st in ("running", _PRELOAD_ENCODING):
             return
         if st == "ready" and _size_of(_final_path(key)) > 0:
             return
@@ -1843,6 +1874,45 @@ def _run_http():
 # ---------------------------------------------------------------------------
 # MCP tools
 # ---------------------------------------------------------------------------
+def _maybe_prefetch(res: list, query: str) -> None:
+    """Tải trước bài khớp gần như tuyệt đối khi search vừa trả về.
+
+    Vì sao: chuỗi thật của agent là search_song -> (LLM suy nghĩ, đọc danh
+    sách, điền khiên robot chờ) -> get_song_url. Giữa hai lệnh đó đã mất vài
+    giây, trong khi resolve+download mất 6-9s. Nếu search đã biết bài nào khớp
+    tuyệt đối thì tải luôn trong lúc đó -> lúc robot phát, file đã nằm sẵn
+    trên đĩa, /stream trả FileResponse ngay, độ trễ về 0.
+
+    Chỉ prefetch khi:
+      - bài đứng đầu khớp QUERY >= _PREFETCH_MIN_SCORE (gần như đúng tên bài,
+        tránh tải nhầm bài chỉ giống lệch vài từ rồi phí băng thông);
+      - bài đó chưa có trong cache và không đang preload;
+      - không có bài nào đang prefetch (giới hạn 1 việc nền, tránh tranh
+        tải với chính bài robot đang yêu cầu).
+    """
+    if not PREFETCH or not res or not query:
+        return
+    top = res[0]
+    title = (top.get("title") or "").strip()
+    if not title or _title_score(query, title) < _PREFETCH_MIN_SCORE:
+        return
+    key = _key_of(title)
+    with _lock:
+        if any(v.get("prefetch") for v in _preload.values()):
+            return  # đang prefetch bài khác
+        st = (_preload.get(key) or {}).get("state")
+        if st in ("running", _PRELOAD_ENCODING) or (
+                st == "ready" and _size_of(_final_path(key)) > 0):
+            return  # đang chạy hoặc đã có sẵn
+        _preload[key] = {"state": "running", "t0": time.time(), "err": "",
+                         "prefetch": True}
+        _titles[key] = title
+    threading.Thread(target=_preload_worker, args=(key, title),
+                     daemon=True).start()
+    sys.stderr.write(f"[music] prefetch '{title}'\n")
+    sys.stderr.flush()
+
+
 @mcp.tool()
 def search_song(keyword: str) -> str:
     """Tìm bài hát theo tên (hoặc tên + ca sĩ). Trả về tối đa 5 kết quả:
@@ -1858,6 +1928,7 @@ def search_song(keyword: str) -> str:
             f"[music]   - {r.get('title')} | {r.get('uploader')} "
             f"[{r.get('source')}]\n")
     sys.stderr.flush()
+    _maybe_prefetch(res, keyword)  # tải trước bài khớp nhất (nền)
     return json.dumps({"results": res}, ensure_ascii=False)
 
 
