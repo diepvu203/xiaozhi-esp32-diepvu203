@@ -1924,7 +1924,12 @@ def stream(key: str, request: Request):
         headers={"Content-Type": "audio/mpeg", "Accept-Ranges": "bytes"})
 
 
-# @mcp.custom_route("/health", methods=["GET"])
+# /health ở ROOT cho Render healthCheckPath — đăng ký qua custom_route nên
+# không cần auth; FastAPI không có route này (Mount đặt SAU nên custom_route
+# được match trước). KHÔNG được comment decorator này: render.yaml đặt
+# healthCheckPath=/health, mất route này thì Render báo deploy failed dù
+# server đã chạy tốt.
+@mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,
