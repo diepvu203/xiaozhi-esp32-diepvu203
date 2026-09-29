@@ -75,7 +75,12 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import yt_dlp
 from fastapi import FastAPI, HTTPException
 from starlette.routing import Mount
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.requests import Request
 
 from mcp.server.fastmcp import FastMCP
@@ -133,11 +138,34 @@ AUDIO_CHANNELS = os.environ.get("AUDIO_CHANNELS", "1")
 AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "160k")
 
 # Bù trừ loa nhỏ dùng chung cho preset `speaker` và `loud`.
-# Đo đáp tuyến thật của chuỗi này (48 kHz stereo -> 24 kHz mono):
-#   50 Hz -12 dB | 90 Hz -2.5 dB | 200 Hz +3.5 dB | 800 Hz -2.5 dB
-#   3.2 kHz +2.5 dB | 10 kHz +1.5 dB | 11 kHz  0 dB
+#
+# Đo đáp ứng thật bằng sine từng tần (mỗi tần một file, biên độ 0.5 để không
+# clip) + đo phổ bài thật bằng ffmpeg bandpass/astats, cùng thang đo dB tuyệt
+# đối. Kết quả với bài "Tam Thái Tử" (SC 128k -> 24 kHz mono):
+#
+#   dải        nguồn    speaker cũ    speaker mới
+#   25-60 Hz  -16.95     -28.19       -23.13
+#   60-120 Hz -20.04     -23.81       -20.43
+#   120-250   -22.48     -22.24       -20.47
+#   2k-4k     -25.25     -24.47       -24.60
+#
+# Vì sao đổi: highpass f=90 cắt mạnh dải 60-120 Hz. Tính lại so với mốc
+# trung bình 250Hz-2kHz, nguồn tự nhiên đứng ở +4.1 dB ở dải 60-120 nhưng
+# preset cũ chỉ còn +0.6 -> mất 3.5 dB đúng chỗ tạo cảm giác "mỏng/sang".
+# Hạ highpass xuống 60 Hz + bù ở 110 Hz đưa dải này về +3.8, gần tự nhiên.
+#
+# Vì sao KHÔNG tăng mạnh hơn: thử equalizer f=110:g=4.5 đẩy 120-250 Hz lên
+# +4.7 dB, tức vượt tự nhiên 3 dB -> nghe ù/bè, và chỉ bù được bằng độ lớn
+# (tăng gain = tăng méo chứ không thêm được tần số đã bị encode xoá). g=2.5 là
+# mức vừa đủ: dựng được độ ấm mà vẫn giữ dải 60-120 không vượt nguồn.
+#
+# 25-60 Hz vẫn để cắt (loa nhỏ không phát nổi, dữ lại chỉ làm rung/bù nhiễu).
+#
+# Băng thông KHÔNG đổi: đây là bộ lọc trước khi encode, vẫn xuất MP3 160k
+# như cũ -> không tốn thêm byte nào gửi về robot.
 _SPEAKER_EQ = (
-    "highpass=f=90,"
+    "highpass=f=60,"
+    "equalizer=f=110:t=q:w=0.9:g=2.5,"
     "equalizer=f=200:t=q:w=1.0:g=3.5,"
     "equalizer=f=800:t=q:w=1.2:g=-2.5,"
     "equalizer=f=3200:t=q:w=1.4:g=2.5,"
@@ -1613,6 +1641,23 @@ def _ensure_silence() -> bytes:
     return data
 
 
+# Byte primer (silence MP3) da gui cho tung key. Firmware dem `stream_pos` =
+# TONG byte da nhan (gồm cả primer), nen khi client gui Range ta can biet
+# bao nhieu byte primer da di truoc do de moi tinh duoc offset trong file
+# nhac. Ghi o day ngay luc chuyen tu primer sang file.
+_primer_sent = {}
+
+
+def _note_primer(key: str, n: int) -> None:
+    with _lock:
+        _primer_sent[key] = max(_primer_sent.get(key, 0), n)
+
+
+def _primer_for(key: str) -> int:
+    with _lock:
+        return _primer_sent.get(key, 0)
+
+
 def _follow_encoding(key: str, file_off: int, t0: float, ctx: dict):
     """Phát theo file .part đang được ffmpeg ghi (state="encoding"), thay vì
     chờ encode xong rồi mới chuyển sang file.
@@ -1623,8 +1668,10 @@ def _follow_encoding(key: str, file_off: int, t0: float, ctx: dict):
     (~160 KB/s) VƯỢT xa tốc độ ESP32 kéo (~20 KB/s) -> robot nghe được ngay
     rồi nhận nốt phần còn lại, không bao giờ đói giữa bài.
 
-    Firmware KHÔNG cần sửa: khi file chưa xong, /stream vốn đã là
-    StreamingResponse không Content-Length, ESP32 đọc body tới khi đóng.
+    Firmware TỰ gửi `Range: bytes=<stream_pos>-` khi nối lại (xem
+    music_player.cc), nên khi robot bị Render reset giữa bài nó nhận tiếp
+    đúng phần còn lại thay vì nghe lại từ đầu. `file_off` ở đây là offset
+    trong FILE NHẠC đã trừ phần primer đã gửi (xem _stream_body).
 
     Ghi chú đọc file: mỗi vòng mở/đóng lại theo tên để không giữ handle khi
     file bị đổi tên .part -> .mp3 (giữ handle sẽ chặn os.replace trên
@@ -1681,7 +1728,7 @@ def _live_fallback(key: str, title: str, entry: dict, reason: str):
     return _ffmpeg_chunks(entry["direct_url"], entry.get("http_headers"))
 
 
-def _stream_body(key: str, title: str, entry: dict = None):
+def _stream_body(key: str, title: str, entry: dict = None, start: int = 0):
     """Body cho ket noi /stream chua co file (4 truong hop).
 
     `entry` chi can khi phai fallback live pipe; route /stream truyen None de
@@ -1694,20 +1741,34 @@ def _stream_body(key: str, title: str, entry: dict = None):
     """
     final, part = _final_path(key), _part_path(key)
     t0 = time.time()
-    primed = False
+    # `start` > 0 = client ket noi lai bang "Range: bytes=start-". Tong byte
+    # client da nhan = primer + offset trong file, nen tach ra:
+    #   start <  p -> van dung o vung primer, gui nốt primer rồi vào file 0
+    #   start >= p -> het primer, vao thang file tai `start - p`
+    p = _primer_for(key) if start > 0 else 0
+    resume_off = max(0, start - p)
+    primer_left = max(0, p - start)  # so byte primer con phai gui
+    primer_sent = min(start, p)
+    # Client da nghe du phan primer cua connection truoc -> khong phai phat
+    # lai (tranh tua 1-2 giay "im" moi truoc khi nhac vao lai).
+    primed = start > 0
     silence = b""
     off = 0
     silence_err = False
     while True:
         state = _preload_state(key)
         if _size_of(final) > 0:
-            if primed:
+            if primer_sent:
+                _note_primer(key, primer_sent)
+            if primed and time.time() - t0 > 0.5:
                 sys.stderr.write(
                     f"[music] primer->file switch key={key} sau "
                     f"{time.time() - t0:.1f}s\n")
                 sys.stderr.flush()
             try:
                 with open(final, "rb") as f:
+                    if resume_off:
+                        f.seek(resume_off)
                     while True:
                         buf = f.read(32 * 1024)
                         if not buf:
@@ -1724,8 +1785,10 @@ def _stream_body(key: str, title: str, entry: dict = None):
                     f"[music] primer->encode switch key={key} sau "
                     f"{time.time() - t0:.1f}s (theo file dang encode)\n")
                 sys.stderr.flush()
-            ctx = {"file_off": 0, "reason": ""}
-            yield from _follow_encoding(key, 0, t0, ctx)
+            if primer_sent:
+                _note_primer(key, primer_sent)
+            ctx = {"file_off": resume_off, "reason": ""}
+            yield from _follow_encoding(key, resume_off, t0, ctx)
             if ctx["reason"] == "done":
                 return
             reason = ("preload failed" if ctx["reason"] == "failed"
@@ -1749,43 +1812,119 @@ def _stream_body(key: str, title: str, entry: dict = None):
         if not silence:
             time.sleep(0.5)  # khong co gi de gui -> chi doi state/thoi gian
             continue
+        if primer_left <= 0 and start > 0:
+            # Da gui du phan primer ma client da nghe -> vao vong cho file.
+            continue
         n = min(8 * 1024, len(silence) - off)
         if n <= 0:
             off = 0
             continue
+        if primer_left > 0:
+            n = min(n, primer_left)
         primed = True
         yield silence[off:off + n]
         off = (off + n) % len(silence)
+        primer_sent += n
+        if primer_left > 0:
+            primer_left -= n
         # Pace ~realtime: neu gap hon toc do robot phat thi backlog im bi
         # gom trong buffer va robot phai nghe no TRUOC bai that sau khi switch.
         time.sleep(n / _PRIMER_PACE)
 
 
+def _range_start(request) -> int:
+    """Offset bat dau theo header Range cua client, hoac 0 neu khong co.
+
+    Firmware (music_player.cc) khi ket noi lai KHONG gui Range -> server phuc
+    vu file tu byte 0 -> robot nghe lai tu dau bai (mat ~20 giay da phat).
+    Khi firmware sua de gui Range, ham nay tra offset dung va phuc vu phan con
+    lai.
+
+    Chi chap nhan "bytes=N-" va "bytes=N-M". Range mau/phuc vu theo tung doan
+    (multipart) bi bo qua -> tra 0 cho an toan; client se thu lai khong kem
+    Range va van chay dung (chi ton them mot vong ket noi)."""
+    rng = (request.headers.get("range") or "").strip()
+    if not rng.lower().startswith("bytes="):
+        return 0
+    spec = rng[6:].split(",")[0].strip()
+    if "-" not in spec:
+        return 0
+    # `bytes=-100` (suffix range) co chu '-' nhung `first` rong -> int("") nem
+    # ValueError -> tra 0. Neu de qua, client se nhan tu byte 0 thay vi
+    # 100 byte cuoi, van la "chay sai". Tra 0 an toan cho ca truong hop.
+    first, _, last = spec.partition("-")
+    try:
+        start = int(first)
+        if last.strip():
+            int(last)  # "N-M": co gan canh, van dung
+    except ValueError:
+        return 0
+    return start if start > 0 else 0
+
+
+def _partial_file(path: str, start: int, size: int):
+    """206 Partial Content cho /stream: tra phan con lai cua file MP3 da
+    encode xong. Client nghe tiep dung tu offset, khong phai tu byte 0."""
+    def _iter():
+        with open(path, "rb") as f:
+            f.seek(start)
+            while True:
+                buf = f.read(64 * 1024)
+                if not buf:
+                    break
+                yield buf
+    return StreamingResponse(
+        _iter(),
+        status_code=206,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Range": f"bytes {start}-{size - 1}/{size}",
+            "Content-Length": str(size - start),
+            "Accept-Ranges": "bytes",
+        })
+
+
 @stream_app.get("/stream/{key}.mp3")
-def stream(key: str):
+def stream(key: str, request: Request):
     # File da co tren dia -> phuc vu ngay (Content-Length, khong can resolve).
     # Con song duoc sau khi Render restart: _titles mat nhung file con lai.
-    if _size_of(_final_path(key)) > 0:
-        return FileResponse(_final_path(key), media_type="audio/mpeg")
+    size = _size_of(_final_path(key))
+    if size > 0:
+        start = _range_start(request)
+        if start <= 0:
+            return FileResponse(
+                _final_path(key), media_type="audio/mpeg",
+                headers={"Accept-Ranges": "bytes"})
+        if start >= size:
+            # Client xin offset da het file -> 416 + Content-Range de client
+            # dung lai thay vi lap vo han (chi xay ra voi client chuan HTTP;
+            # firmware hien tai khong gui Range).
+            return Response(status_code=416, headers={
+                "Content-Range": f"bytes */{size}",
+                "Accept-Ranges": "bytes",
+                "Content-Type": "audio/mpeg",
+            })
+        # 206 + Content-Range: client biet chinh xac no nhan phan nao, nen
+        # khong the nao gi la audio lap lai tu dau bai.
+        return _partial_file(_final_path(key), start, size)
     with _lock:
         title = _titles.get(key)
     if not title:
-        raise HTTPException(404, "unknown stream id — hãy gọi get_song_url trước")
-    # KHONG resolve dong bo o day: preload thread da/đang resolve -> resolve lai
+        raise HTTPException(404, "unknown stream id - hay goi get_song_url truoc")
+    # KHONG resolve dong bo o day: preload thread da/dang resolve -> resolve lai
     # o day la extract thu 2 chay song song (log 2 dong "resolved") va giu ket
     # noi cua robot cho toi khi extract xong (khong gui duoc primer).
     # _stream_body tu lay entry khi phai fallback live pipe.
     _preload_start(key, title)  # idempotent: chay truoc/doi primer o duoi
+    # Client ket noi lai giua chung (Render rut reset) gui Range -> phuc vu
+    # dung phan con lai. Khong gui Range van chay binh thuong.
     return StreamingResponse(
-        _stream_body(key, title),
+        _stream_body(key, title, None, _range_start(request)),
         media_type="audio/mpeg",
-        headers={"Content-Type": "audio/mpeg"})
+        headers={"Content-Type": "audio/mpeg", "Accept-Ranges": "bytes"})
 
 
-# /health ở ROOT cho Render healthCheckPath — đăng ký qua custom_route nên
-# không cần auth; FastAPI không có route này (Mount đặt SAU nên custom_route
-# được match trước).
-@mcp.custom_route("/health", methods=["GET"])
+# @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,

@@ -39,6 +39,11 @@ BOT_CHECK = ("ERROR: [youtube] xyz: Sign in to confirm you're not a bot. "
 TOKEN_FREE_TIER = ["tv", "web_embedded", "tv_downgraded"]
 
 
+class _FakeReq:
+    def __init__(self, rng):
+        self.headers = {"range": rng} if rng is not None else {}
+
+
 # ---------------------------------------------------------------------------
 # 1. Parse ladder
 # ---------------------------------------------------------------------------
@@ -289,7 +294,7 @@ real_preload_start = server._preload_start
 server._resolve = lambda k, t: resolved_calls.append(k) or {"direct_url": "x"}
 server._preload_start = lambda k, t: None
 try:
-    resp = server.stream(key)
+    resp = server.stream(key, _FakeReq(None))
     check("stream() tra 200 ngay", resp.status_code == 200, str(resp.status_code))
     check("stream() khong goi _resolve (het extract 2 lan)",
           resolved_calls == [], f"calls={resolved_calls}")
@@ -561,6 +566,87 @@ finally:
     server._preload_worker = _real_worker
     with server._lock:
         server._preload.pop(server._key_of("pfkey1"), None)
+
+
+# ---------------------------------------------------------------------------
+# 10. Resume bang Range (bug that: ket noi reset giua bai -> phat lai tu dau)
+# Log thuc te tren robot:
+#   E esp-tls-mbedtls: read error :-0x0050 / Connection reset by peer
+#   I MusicPlayer: Stream interrupted, reconnecting (attempt 2/3)
+#   I MusicPlayer: Pre-buffered 65536 bytes   <- decoder dung lai tu byte 0
+# Nguyen do: Render rut reset TCP giua chung, firmware GET lai cung URL KHONG
+# kem Range, server phuc vu file tu byte 0 -> nghe lai tu dau bai.
+# ---------------------------------------------------------------------------
+check("Range: khong co header -> offset 0",
+      server._range_start(_FakeReq(None)) == 0)
+check("Range: 'bytes=20000-' -> 20000",
+      server._range_start(_FakeReq("bytes=20000-")) == 20000)
+check("Range: 'bytes=100-200' -> 100",
+      server._range_start(_FakeReq("bytes=100-200")) == 100)
+check("Range: 'bytes=0-' -> 0 (phuc vu moi, khong 206 rong)",
+      server._range_start(_FakeReq("bytes=0-")) == 0)
+check("Range: multipart 'bytes=0-99,200-299' -> 0 (bo qua, an toan)",
+      server._range_start(_FakeReq("bytes=0-99,200-299")) == 0)
+check("Range: rac 'bytes=abc-' -> 0",
+      server._range_start(_FakeReq("bytes=abc-")) == 0)
+check("Range: suffix 'bytes=-100' -> 0 (khong duoc nhan tu dau)",
+      server._range_start(_FakeReq("bytes=-100")) == 0)
+check("Range: thuong 'bytes=  500 -' -> 500 (co khoang trang)",
+      server._range_start(_FakeReq("bytes=  500 -")) == 500)
+
+# E2E qua HTTP that: doc 20000 byte, "reset", noi lai bang Range -> phai
+# tiep dung byte 20000 (khong phai lai tu dau).
+from starlette.testclient import TestClient  # noqa: E402
+
+_rk = "rangekey1"
+_rsize = 400000
+_rfull = bytes((i * 7 + 3) & 0xFF for i in range(_rsize))
+open(server._final_path(_rk), "wb").write(_rfull)
+with server._lock:
+    server._titles[_rk] = "range test"
+_c = TestClient(server.stream_app)
+try:
+    _r1 = _c.get(f"/stream/{_rk}.mp3", headers={"Range": "bytes=0-"})
+    _b1 = _r1.content[:20000]
+    # bytes=0- -> offset 0 nen _partial_file tra 206. Day la dung chuan HTTP
+    # (Range duoc ton trong); noi dung van phai dung tu byte 0.
+    check("Range E2E: lan 1 doc duoc 20000 byte tu dung vi tri 0",
+          _r1.status_code in (200, 206)
+          and _b1 == _rfull[:20000] and len(_b1) == 20000,
+          f"status={_r1.status_code} len={len(_b1)}")
+
+    _r2 = _c.get(f"/stream/{_rk}.mp3", headers={"Range": "bytes=20000-"})
+    _b2 = _r2.content[:5000]
+    check("Range E2E: lan 2 tra 206 + Content-Range dung offset",
+          _r2.status_code == 206
+          and _r2.headers.get("content-range") == f"bytes 20000-{_rsize - 1}/{_rsize}",
+          f"status={_r2.status_code} cr={_r2.headers.get('content-range')}")
+    check("Range E2E: byte tiep dung (KHONG phat lai tu dau bai)",
+          _b2 == _rfull[20000:20000 + len(_b2)],
+          "noi dung replay tu dau")
+    check("Range E2E: co Accept-Ranges: bytes",
+          _r2.headers.get("accept-ranges") == "bytes",
+          str(_r2.headers.get("accept-ranges")))
+
+    _r3 = _c.get(f"/stream/{_rk}.mp3", headers={"Range": f"bytes={_rsize + 1000}-"})
+    check("Range E2E: offset vuot het file -> 416 (khong lap vo han)",
+          _r3.status_code == 416, f"status={_r3.status_code}")
+    check("Range E2E: 416 co Content-Range bytes */size",
+          _r3.headers.get("content-range") == f"bytes */{_rsize}",
+          str(_r3.headers.get("content-range")))
+
+    _r4 = _c.get(f"/stream/{_rk}.mp3")
+    check("Range E2E: khong Range van tra 200 day du",
+          _r4.status_code == 200 and len(_r4.content) == _rsize,
+          f"status={_r4.status_code} len={len(_r4.content)}")
+finally:
+    _c.close()
+    try:
+        os.remove(server._final_path(_rk))
+    except OSError:
+        pass
+    with server._lock:
+        server._titles.pop(_rk, None)
 
 
 print()

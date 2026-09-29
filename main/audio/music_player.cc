@@ -117,6 +117,12 @@ void MusicPlayer::StreamTask(std::string url) {
     int64_t last_err_log_us = 0;
     int64_t last_stats_us = esp_timer_get_time();
     int64_t pcm_written = 0;
+    // Byte offset trong file MP3 goc ma PCM da duoc day vao playback queue.
+    // SONG SOT qua cac lan ket noi lai: khi server rut reset, ta gui
+    // "Range: bytes=<stream_pos>-" de no gui tiep phan con lai. Khong co
+    // bien nay, moi lan reconnect lai nghe tu dau bai (mat ~20 giay da
+    // phat) — trieu chung "nghe mot ti roi quay lai ban dau".
+    size_t stream_pos = 0;
 
     // Mute TTS immediately so it does not compete for the radio while we are
     // connecting/reconnecting to the music server.
@@ -142,11 +148,23 @@ void MusicPlayer::StreamTask(std::string url) {
         http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
 
         bool will_retry = false;
+        bool reached_eof = false;  // 416: da nghe het file, khong phai loi
 
         client = esp_http_client_init(&http_cfg);
         if (client == nullptr) {
             ESP_LOGE(TAG, "esp_http_client_init failed");
             break;
+        }
+
+        // Lan 2 tro di: noi tiep tu byte da nghe, khong tu dau bai. Server
+        // tra 206 + phan con lai cua file (xem _range_start/_partial_file).
+        // Header chi dat khi that su can — lan ket noi dau tien gui
+        // "bytes=0-" vo nghia va co the bi server tra 416 neu file rong.
+        if (stream_attempt > 1 && stream_pos > 0) {
+            char range[48];
+            snprintf(range, sizeof(range), "bytes=%u-", (unsigned)stream_pos);
+            esp_http_client_set_header(client, "Range", range);
+            ESP_LOGI(TAG, "Resuming at byte %u", (unsigned)stream_pos);
         }
 
         // Retry the connection a few times: on weak WiFi a single TCP/HTTP
@@ -166,9 +184,17 @@ void MusicPlayer::StreamTask(std::string url) {
         } else {
             esp_http_client_fetch_headers(client);
             int status = esp_http_client_get_status_code(client);
-            if (status != 200) {
+            // 200 = file day du (lan dau). 206 = phan con lai sau Range.
+            // 416 = offset da vuot qua cuoi file -> het bai, dung lai (thu
+            // ket noi moi tu dau thay vi ket noi lai 3 lan vo ich).
+            if (status != 200 && status != 206 && status != 416) {
                 ESP_LOGE(TAG, "HTTP status %d", status);
                 will_retry = true;
+            } else if (status == 416) {
+                ESP_LOGI(TAG, "HTTP 416 — reached end of file");
+                reached_eof = true;
+            } else if (status == 206) {
+                ESP_LOGI(TAG, "HTTP 206 — resuming");
             }
         }
 
@@ -177,6 +203,14 @@ void MusicPlayer::StreamTask(std::string url) {
             esp_http_client_cleanup(client);
             client = nullptr;
             continue;
+        }
+        if (reached_eof) {
+            // Het file: ket thuc ngay, khong vao vong decode (se khong co byte
+            // nao de doc) va khong retry — bai da phat xong.
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            client = nullptr;
+            break;
         }
 
         ESP_LOGI(TAG, "Streaming (output %d Hz)", out_rate);
@@ -326,6 +360,9 @@ void MusicPlayer::StreamTask(std::string url) {
                 }
                 uint32_t consumed = raw.consumed;
                 if (frame.decoded_size > 0) {
+                    // Byte nao da giai ma thanh cong thi da "dung" — cong vao
+                    // stream_pos de lan ket noi sau gui Range tu day.
+                    stream_pos += consumed;
                     // Update stream format on first decoded frame.
                     if (src_rate == 0) {
                         esp_audio_dec_info_t info = {};
