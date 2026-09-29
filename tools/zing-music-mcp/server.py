@@ -33,6 +33,13 @@ Cấu hình qua biến môi trường:
                   "Sign in to confirm you're not a bot" khi deploy IP datacenter).
                   Xem README để biết cách export cookies.
   YTDLP_PROXY    — proxy tùy chọn cho yt-dlp (vd http://user:pass@host:port).
+  YTDLP_PLAYER_CLIENTS — ladder player client của YouTubeExtractor; các tier
+                  cách nhau bằng "|", client trong tier cách nhau bằng ",";
+                  tier rỗng = để yt-dlp dùng client mặc định. Mặc định:
+                  "|visionos,tv,web_embedded|mweb,tv_simply,web|android_vr,android,ios"
+  YTDLP_DEBUG    — "1" để in cả message [debug] của yt-dlp
+                  (mặc định: info/warn/err — warning theo client là manh mối
+                  chính để chẩn đoán bot-check).
 
 Chạy: python server.py
 """
@@ -278,12 +285,63 @@ if not _cookies_b64 and not POT_AVAILABLE:
 YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
 
 
+# YTDLP_DEBUG=1 -> in ca message [debug]; mac dinh chi info/warn/err.
+YTDLP_DEBUG = os.environ.get("YTDLP_DEBUG", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
+
+class _YtdlpLogger:
+    """Bơm message của yt-dlp ra stderr để hiện trong log Render.
+
+    Trước đây opts đặt no_warnings=True -> mất TOÀN BỘ warning theo từng client
+    ("Sign in to confirm you're not a bot", "<client> formats require a GVS PO
+    Token which was not provided", "Skipping unsupported client") nên log chỉ
+    còn 1 dòng resolve give-up chung, không biết hỏng ở client nào. yt-dlp thử
+    tiếp client kế tiếp khi client trước lỗi (extractor/youtube/_video.py:
+    ExtractorError -> report_warning + continue) nên các warning này là manh mối
+    DUY NHẤT để phân biệt "IP bị gắn cờ" với "thiếu PO token".
+    """
+
+    def __init__(self, verbose: bool = False):
+        self._verbose = verbose
+
+    def _emit(self, level: str, msg: str) -> None:
+        sys.stderr.write(f"[ytdlp:{level}] {msg}\n")
+        sys.stderr.flush()
+
+    def debug(self, msg):
+        """yt-dlp gửi message [debug] ở đây; message thường cũng đi qua đây."""
+        text = str(msg)
+        if text.startswith("[debug] "):
+            if self._verbose:
+                self._emit("debug", text[8:])
+        else:
+            self._emit("info", text)
+
+    def info(self, msg):
+        self._emit("info", str(msg))
+
+    def warning(self, msg):
+        self._emit("warn", str(msg))
+
+    def error(self, msg):
+        self._emit("err", str(msg))
+
+
+_YTDLP_LOGGER = _YtdlpLogger(YTDLP_DEBUG)
+
+
 def _apply_ydl_auth(opts: dict) -> dict:
-    """Gắn cookiefile/proxy vào opts yt-dlp nếu env corresponding có set."""
+    """Gắn cookiefile/proxy/logger vào opts yt-dlp nếu env tương ứng có set.
+
+    no_warnings luôn = False: warning theo từng client là dữ liệu chẩn đoán
+    bot-check, không được ẩn (xem _YtdlpLogger)."""
     if COOKIES_FILE:
         opts["cookiefile"] = COOKIES_FILE
     if YTDLP_PROXY:
         opts["proxy"] = YTDLP_PROXY
+    opts["no_warnings"] = False
+    opts["logger"] = _YTDLP_LOGGER
     return opts
 
 
@@ -351,7 +409,6 @@ def _search_youtube_html(query: str, n: int) -> list:
 def _search_youtube(query: str, n: int) -> list:
     opts = {
         "quiet": True,
-        "no_warnings": True,
         "extract_flat": True,
         "default_search": f"ytsearch{n}",
     }
@@ -408,6 +465,45 @@ def _stream_url(key: str) -> str:
     return f"{base}/stream/{key}.mp3"
 
 
+# ---------------------------------------------------------------------------
+# Ladder player client (env YTDLP_PLAYER_CLIENTS)
+# ---------------------------------------------------------------------------
+# yt-dlp chi thu client ke tiep khi client truoc loi, va muc "client nay co can
+# PO token khong" nam trong INNERTUBE_CLIENTS[...]['GVS_PO_TOKEN_POLICY'].
+# Voi ban yt-dlp dang pin (xem requirements.txt):
+#   visionos / tv / web_embedded -> KHONG can PO token
+#   mweb / tv_simply / web       -> can token web (bgutil sinh duoc)
+#   android_vr / android / ios   -> can token Android/iOS (bgutil KHONG sinh duoc)
+# Nen ladder mac dinh: default (visionos+web, co POT) -> nhom token-free ->
+# nhom web+POT -> nhom android/ios (chi huu ich khi co token/cookies phu hop).
+_DEFAULT_CLIENT_LADDER = (
+    "|visionos,tv,web_embedded|mweb,tv_simply,web|android_vr,android,ios")
+_CLIENT_LEVEL_MARKERS = (
+    "not a bot", "Sign in to confirm", "needs to be reloaded",
+    "Failed to extract any player response",
+    "All player responses are invalid",
+)
+
+
+def _parse_client_ladder(raw: str) -> tuple:
+    """'a,b|' -> (('a', 'b'), ()). Tier rong = dung client mac dinh cua yt-dlp."""
+    tiers = []
+    for chunk in str(raw or "").split("|"):
+        tiers.append(tuple(c.strip() for c in chunk.split(",") if c.strip()))
+    return tuple(tiers) or ((),)
+
+
+def _is_client_level_err(err) -> bool:
+    """Loi o muc client (bot-check / thieu token) -> nhay sang tier client ke
+    tiep; loi khac (video unavailable, HTTP...) thi noi len ngay."""
+    text = str(err)
+    return any(m in text for m in _CLIENT_LEVEL_MARKERS)
+
+
+_CLIENT_TIERS = _parse_client_ladder(
+    os.environ.get("YTDLP_PLAYER_CLIENTS", _DEFAULT_CLIENT_LADDER))
+
+
 def _resolve(key: str, title: str) -> dict:
     with _lock:
         cached = _resolved.get(key)
@@ -415,7 +511,6 @@ def _resolve(key: str, title: str) -> dict:
         return cached
     base_opts = {
         "quiet": True,
-        "no_warnings": True,
         # Ưu tiên nguồn tốt hơn để giảm "generation loss" khi encode lại MP3
         # (Opus ~160k / AAC 128k tốt hơn hẳn mp3 128k của YouTube).
         "default_search": "ytsearch1",
@@ -432,131 +527,100 @@ def _resolve(key: str, title: str) -> dict:
     )
     info = None
     last_err = None
-    for fmt in _format_tiers:
-        opts = dict(base_opts)
-        if fmt:
-            opts["format"] = fmt
-        _apply_ydl_auth(opts)
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(title, download=False)
-            break
-        except yt_dlp.utils.DownloadError as e:
-            if ("not a bot" in str(e) or "Sign in to confirm" in str(e)
-                    or "needs to be reloaded" in str(e)):
-                # Bot-check (datacenter IP) hoac tv_downgraded UNPLAYABLE
-                # (yt-dlp #17389: default client khi cookies dang nhap):
-                # do NOT raise here — fall through
-                # to the player_client=[android,ios,tv] fallback below (it
-                # does not need web-sig/PO-token) instead of dying at tier 1.
-                last_err = e
-                break
-            if "Requested format is not available" not in str(e):
-                raise  # lỗi khác (bot-check, unavailable...) -> nổi lên ngay
-            last_err = e
-    if info is None:
-        # Chẩn đoán (stderr): extract KHÔNG selector để đếm formats;
-        # no_warnings=False để lộ cảnh báo EJS/JS-runtime thường bị ẩn.
-        n_formats = -1
-        diag = None
-        # Loi client-level (bot-check / "needs to be reloaded" - tv_downgraded
-        # UNPLAYABLE, yt-dlp #17389): default client se trung loi nay -> skip
-        # diag (chi tach thoi gian) va di thang player_client fallback.
-        _client_level = last_err is not None and any(
-            s in str(last_err) for s in (
-                "needs to be reloaded", "not a bot", "Sign in to confirm"))
-        if _client_level:
-            sys.stderr.write(
-                f"[music] skip diag (client-level): {last_err}\n")
-        else:
-            diag_opts = dict(base_opts)
-            diag_opts["no_warnings"] = False
-            _apply_ydl_auth(diag_opts)
+    won_via = ""
+    tried = []
+    # Vòng lặp 2 chiều: tier client (rỗng = client mặc định của yt-dlp) ×
+    # format selector. Bot-check / thiếu PO token là lỗi mức CLIENT -> đổi
+    # format selector không giúp gì, nhảy ngay sang tier client kế tiếp.
+    for clients in _CLIENT_TIERS:
+        label = ",".join(clients) if clients else "default"
+        for fmt in _format_tiers:
+            opts = dict(base_opts)
+            if fmt:
+                opts["format"] = fmt
+            if clients:
+                opts["extractor_args"] = {
+                    "youtube": {"player_client": list(clients)}}
+            _apply_ydl_auth(opts)
             try:
-                with yt_dlp.YoutubeDL(diag_opts) as ydl:
-                    diag = ydl.extract_info(title, download=False)
-                n_formats = len(diag.get("formats") or [])
-            except Exception as de:  # noqa: BLE001 - chẩn đoán
-                sys.stderr.write(f"[music] diag extract: {de}\n")
-        sys.stderr.write(
-            f"[music] resolve fail '{title}': formats={n_formats}, "
-            f"deno={shutil.which('deno') or 'NOT FOUND'}, "
-            f"yt-dlp={yt_dlp.version.__version__}\n")
-        if diag is not None and n_formats > 0:
-            # Plain extract có formats (selector ảo là thủ phạm) -> dùng luôn.
-            info = diag
-        else:
-            # Fallback: player_client không cần web-sig/PO-token — đặc trị
-            # formats=[] khi cookies + IP datacenter khiến web client bị strip.
-            cli_opts = dict(base_opts)
-            cli_opts["format"] = "bestaudio/best"
-            cli_opts["extractor_args"] = {
-                "youtube": {"player_client": [
-                    "android", "ios", "tv", "web_embedded"]}}
-            _apply_ydl_auth(cli_opts)
-            try:
-                with yt_dlp.YoutubeDL(cli_opts) as ydl:
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(title, download=False)
-                sys.stderr.write(
-                    "[music] resolved via player_client="
-                    "android,ios,tv,web_embedded\n")
+                if not info:
+                    raise yt_dlp.utils.DownloadError("extract trả về rỗng")
+                break
             except yt_dlp.utils.DownloadError as e:
-                sys.stderr.write(
-                    f"[music] player_client fallback failed "
-                    f"(cookies={'on' if COOKIES_FILE else 'off'}, "
-                    f"proxy={'on' if YTDLP_PROXY else 'off'}): {e}\n")
                 last_err = e
-        if info is None:
-            _srv = _pot_server_up() if POT_AVAILABLE else False
-            sys.stderr.write(
-                f"[music] resolve give-up '{title}': cookies="
-                f"{'on' if COOKIES_FILE else 'off'}, proxy="
-                f"{'on' if YTDLP_PROXY else 'off'}, "
-                f"pot={'on' if POT_AVAILABLE else 'off'}, "
-                f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}, "
-                f"last={last_err}\n")
-            _hint = ""
-            if last_err is not None and any(
-                    s in str(last_err)
-                    for s in ("not a bot", "Sign in to confirm")):
-                # Bot-check that survived BOTH tier-1 and player_client
-                # fallback = session/IP problem, khong phai format problem.
-                if POT_AVAILABLE and not _srv:
-                    # Plugin cai roi nhung server POT khong tra loi luc yt-dlp
-                    # can token -> provider that bai im lap (no_warnings=True).
-                    _hint = (
-                        " -> POT server DOWN khi yt-dlp cần PO token "
-                        "(127.0.0.1:4416 không /ping — nghi deno OOM-kill trên "
-                        "512MB): xem log [start], restart service; lặp lại -> "
-                        "tăng RAM instance")
-                elif POT_AVAILABLE:
-                    # PO token hoạt động mà Google vẫn đòi đăng nhập →
-                    # IP/proxy session mới là thủ phạm.
-                    _hint = (
-                        " -> PO token (bgutil) đã cài nhưng vẫn bị bot-check: "
-                        "IP proxy bị flag — xoay proxy mới (nên sticky/"
-                        "residential) hoặc tạm xóa YTDLP_PROXY; cookies đang "
-                        "on thì xóa luôn YTDLP_COOKIES_B64 (session revoked "
-                        "gây hard-block) để test từng biến (xem README)")
-                elif COOKIES_FILE:
-                    _hint = (
-                        " -> cookie YouTube hết hạn/bị revoke: export lại "
-                        "cookies.txt rồi cập nhật env YTDLP_COOKIES_B64 "
-                        "trên Render (xem README)")
-                else:
-                    _hint = (
-                        " -> chưa có PO token/cookies: cài bgutil plugin "
-                        "(requirements.txt) hoặc đặt env YTDLP_COOKIES_B64 "
-                        "(xem README)")
-            raise RuntimeError(
-                f"không lấy được format nào cho '{title}' "
-                f"(formats={n_formats}, "
-                f"deno={'yes' if shutil.which('deno') else 'NO'}, "
-                f"cookies={'on' if COOKIES_FILE else 'off'}, "
-                f"proxy={'on' if YTDLP_PROXY else 'off'}, "
-                f"pot={'on' if POT_AVAILABLE else 'off'}, "
-                f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}): "
-                f"{last_err}{_hint}")
+                if _is_client_level_err(e):
+                    sys.stderr.write(
+                        f"[music] client tier '{label}' bị chặn: "
+                        f"{str(e)[:160]}\n")
+                    sys.stderr.flush()
+                    break
+                if "Requested format is not available" not in str(e):
+                    raise  # lỗi khác (unavailable, HTTP...) -> nổi lên ngay
+        if info:
+            won_via = label
+            break
+        if label not in tried:
+            tried.append(label)
+    if info:
+        sys.stderr.write(
+            f"[music] resolve OK qua tier '{won_via}' "
+            f"(tier đã fail: {', '.join(tried) if tried else 'không'}), "
+            f"yt-dlp={yt_dlp.version.__version__}\n")
+        sys.stderr.flush()
+    if info is None:
+        _srv = _pot_server_up() if POT_AVAILABLE else False
+        sys.stderr.write(
+            f"[music] resolve give-up '{title}': cookies="
+            f"{'on' if COOKIES_FILE else 'off'}, proxy="
+            f"{'on' if YTDLP_PROXY else 'off'}, "
+            f"pot={'on' if POT_AVAILABLE else 'off'}, "
+            f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}, "
+            f"tier_da_thu={tried or ['default']}, "
+            f"last={last_err}\n")
+        _hint = ""
+        if last_err is not None and any(
+                s in str(last_err)
+                for s in ("not a bot", "Sign in to confirm")):
+            # Bot-check sống sót qua TOÀN BỘ tier client.
+            if POT_AVAILABLE and not _srv:
+                # Plugin đã cài nhưng server POT không trả lời lúc yt-dlp cần
+                # token -> provider thất bại (đã thấy qua dòng [ytdlp:warn]).
+                _hint = (
+                    " -> POT server DOWN khi yt-dlp cần PO token "
+                    "(127.0.0.1:4416 không /ping — nghi deno OOM-kill trên "
+                    "512MB): xem log [start], restart service; lặp lại -> "
+                    "tăng RAM instance")
+            elif POT_AVAILABLE:
+                _hint = (
+                    " -> PO token có nhưng vẫn bot-check. Đọc các dòng "
+                    "[ytdlp:warn] phía trên để biết client nào fail: nếu CẢ "
+                    "nhóm không cần token (visionos/tv/web_embedded) cũng "
+                    "fail thì IP datacenter đã bị gắn cờ -> cần "
+                    "YTDLP_COOKIES_B64 mới hoặc proxy sticky/residential "
+                    "sạch; nếu chỉ nhóm cần token fail thì lỗi ở provider "
+                    "POT / JS runtime (deno)")
+            elif COOKIES_FILE:
+                _hint = (
+                    " -> cookie YouTube hết hạn/bị revoke: export lại "
+                    "cookies.txt rồi cập nhật env YTDLP_COOKIES_B64 "
+                    "trên Render (xem README)")
+            else:
+                _hint = (
+                    " -> chưa có PO token/cookies: cài bgutil plugin "
+                    "(requirements.txt) hoặc đặt env YTDLP_COOKIES_B64 "
+                    "(xem README)")
+        raise RuntimeError(
+            f"không lấy được format nào cho '{title}' "
+            f"(tier_da_thu={tried or ['default']}, "
+            f"deno={'yes' if shutil.which('deno') else 'NO'}, "
+            f"yt-dlp={yt_dlp.version.__version__}, "
+            f"cookies={'on' if COOKIES_FILE else 'off'}, "
+            f"proxy={'on' if YTDLP_PROXY else 'off'}, "
+            f"pot={'on' if POT_AVAILABLE else 'off'}, "
+            f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}): "
+            f"{last_err}{_hint}")
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
     if not direct:
@@ -572,11 +636,23 @@ def _resolve(key: str, title: str) -> dict:
         if pick is None:
             raise RuntimeError("không lấy được direct stream URL")
         direct = pick["url"]
+    # '__yt_dlp_client' = client Innertube đã sinh ra format này (yt-dlp gắn vào
+    # từng format) -> log lại để biết đường nào thực sự chạy được. Có trường hợp
+    # format được chọn không mang key này (ví dụ nhánh HLS/m3u8) -> lấy thêm danh
+    # sách client thấy trong toàn bộ formats để vẫn có manh mối.
+    clients_seen = sorted(
+        {f.get("__yt_dlp_client") for f in (info.get("formats") or [])
+         if f.get("__yt_dlp_client")})
+    yt_client = (chosen.get("__yt_dlp_client")
+                 or info.get("__yt_dlp_client")
+                 or (clients_seen[0] if len(clients_seen) == 1 else "")
+                 or won_via or "n/a")
     entry = {
         "direct_url": direct,
         "title": chosen.get("title") or title,
         "uploader": chosen.get("uploader") or chosen.get("channel"),
         "duration": chosen.get("duration"),
+        "client": yt_client,
         # Headers yt-dlp dùng cho format này (UA android/ios/tv...) — _ffmpeg_chunks
         # replay để googlevideo không 403.
         "http_headers": (chosen.get("http_headers")
@@ -585,7 +661,11 @@ def _resolve(key: str, title: str) -> dict:
     }
     with _lock:
         _resolved[key] = entry
-    sys.stderr.write(f"[music] resolved '{entry['title']}'\n")
+    sys.stderr.write(
+        f"[music] resolved '{entry['title']}' (client={yt_client}, "
+        f"formats_client={clients_seen or 'n/a'}, "
+        f"format_id={chosen.get('format_id') or 'n/a'}, "
+        f"abr={chosen.get('abr') or 'n/a'})\n")
     sys.stderr.flush()
     return entry
 
@@ -830,7 +910,9 @@ def _preload_worker(key: str, title: str) -> None:
                 with _lock:
                     _resolved.pop(key, None)  # buoc resolve URL moi
                 _preload_state_update(key, note="resolve-fresh")
+            t_step = time.time()
             entry = _resolve(key, title)
+            t_resolve = time.time() - t_step
             url = entry["direct_url"]
             headers = entry.get("http_headers")
             for p in (part, src):
@@ -838,11 +920,20 @@ def _preload_worker(key: str, title: str) -> None:
                     os.remove(p)
                 except OSError:
                     pass
+            t_step = time.time()
+            src_bytes = 0
             if ".m3u8" in url.lower():
+                # ffmpeg vua tai vua encode -> khong tach duoc 2 cong doan.
                 _download_ffmpeg(url, headers, part)
+                t_download = time.time() - t_step
+                t_transcode = 0.0
             else:
                 _fetch_chunked(url, headers, src)
+                src_bytes = _size_of(src)
+                t_download = time.time() - t_step
+                t_step = time.time()
                 _transcode_local(src, part)
+                t_transcode = time.time() - t_step
                 try:
                     os.remove(src)
                 except OSError:
@@ -852,9 +943,15 @@ def _preload_worker(key: str, title: str) -> None:
                     f"mp3 qua nho sau transcode: {_size_of(part)}")
             os.replace(part, final)  # atomic -> reader khong thay file nua do
             _preload_state_update(key, state="ready", err="")
+            # Chia thoi gian theo cong doan: resolve (mang/POT) - tai
+            # (googlevideo/proxy) - transcode (CPU instance). Day la so lieu de
+            # biet nut that that su thay vi toi uu nham cho.
             sys.stderr.write(
                 f"[music] preload OK '{entry['title']}' ({_size_of(final)} B, "
-                f"{time.time() - t0:.0f}s, cycle {cycle + 1})\n")
+                f"{time.time() - t0:.0f}s = resolve {t_resolve:.0f}s + tai "
+                f"{t_download:.0f}s ({src_bytes or _size_of(part)} B) + "
+                f"transcode {t_transcode:.0f}s, cycle {cycle + 1}, "
+                f"client={entry.get('client') or 'n/a'})\n")
             sys.stderr.flush()
             _prune_cache()
             return
@@ -975,8 +1072,11 @@ def _ensure_silence() -> bytes:
     return data
 
 
-def _stream_body(key: str, title: str, entry: dict):
-    """Body cho ket noi /stream chua co file (4 truong hop):
+def _stream_body(key: str, title: str, entry: dict = None):
+    """Body cho ket noi /stream chua co file (4 truong hop).
+
+    `entry` chi can khi phai fallback live pipe; route /stream truyen None de
+    khong resolve dong bo (tranh extract lan 2 chay song song voi preload).
       1. File xong         -> doc toan bo file, dung (primer neu da gui ~0.4s).
       2. Dang tai           -> primer silence 8 KB, pace ~realtime -> cho file
                                xong roi chuyen sang file tu byte 0 (MP3 lien tuc).
@@ -1015,10 +1115,18 @@ def _stream_body(key: str, title: str, entry: dict):
             sys.stderr.write(
                 f"[music] {reason} -> live pipe fallback key={key}\n")
             sys.stderr.flush()
-            try:
-                entry = _resolve(key, title)  # URL moi nhat cho fallback
-            except Exception:
-                pass  # giu entry lay luc route
+            with _lock:
+                cached = _resolved.get(key)
+            if cached and cached.get("expires", 0) > time.time():
+                entry = cached  # URL preload da resolve san -> khong ton extract
+            else:
+                try:
+                    entry = _resolve(key, title)  # URL moi nhat cho fallback
+                except Exception as e:  # noqa: BLE001
+                    sys.stderr.write(
+                        f"[music] live pipe fallback resolve loi: {e}\n")
+                    sys.stderr.flush()
+                    return  # het duong -> dong response de firmware thu lai
             yield from _ffmpeg_chunks(entry["direct_url"],
                                       entry.get("http_headers"))
             return
@@ -1056,13 +1164,13 @@ def stream(key: str):
         title = _titles.get(key)
     if not title:
         raise HTTPException(404, "unknown stream id — hãy gọi get_song_url trước")
-    try:
-        entry = _resolve(key, title)
-    except Exception as e:
-        raise HTTPException(502, f"resolve thất bại: {e}")
+    # KHONG resolve dong bo o day: preload thread da/đang resolve -> resolve lai
+    # o day la extract thu 2 chay song song (log 2 dong "resolved") va giu ket
+    # noi cua robot cho toi khi extract xong (khong gui duoc primer).
+    # _stream_body tu lay entry khi phai fallback live pipe.
     _preload_start(key, title)  # idempotent: chay truoc/doi primer o duoi
     return StreamingResponse(
-        _stream_body(key, title, entry),
+        _stream_body(key, title),
         media_type="audio/mpeg",
         headers={"Content-Type": "audio/mpeg"})
 

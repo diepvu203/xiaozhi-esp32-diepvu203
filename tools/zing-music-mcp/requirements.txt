@@ -1,5 +1,8 @@
 mcp<2
-yt-dlp
+# Pin version: danh sach player client + policy PO token cua YouTubeExtractor
+# doi theo tung ban (ladder trong server.py duoc viet theo 2026.8.19) -> khong
+# pin thi moi lan build lai khac hanh vi, rat kho tai hien loi bot-check.
+yt-dlp==2026.8.19
 imageio-ffmpeg
 websockets
 python-dotenv

@@ -40,12 +40,40 @@ trực tiếp (hành vi cũ, giảm cấp).
 | `AUDIO_FILTERS` | Chuỗi `ffmpeg -af` tuỳ ý, **đè** preset khi được set. `""` = tắt DSP |
 | `MUSIC_CACHE_DIR` | Thư mục cache bài hát đã tải. Mặc định `<tmp>/zing-music` |
 | `MUSIC_CACHE_MAX_FILES` | Số bài giữ trong cache (mỗi bài ~1–12 MB). Mặc định `20` |
+| `YTDLP_COOKIES_B64` | base64 của `cookies.txt` (Netscape) cho yt-dlp — phương án khi PO token chưa đủ. Xem mục bot-check |
+| `YTDLP_PROXY` | Proxy cho yt-dlp + bước tải source (nên **sticky/residential**, không xoay IP liên tục) |
+| `YTDLP_PLAYER_CLIENTS` | Ladder player client: tier cách nhau `\|`, client trong tier cách nhau `,`, tier rỗng = client mặc định của yt-dlp. Mặc định `\|visionos,tv,web_embedded\|mweb,tv_simply,web\|android_vr,android,ios` |
+| `YTDLP_DEBUG` | `1` = in cả message `[debug]` của yt-dlp (mặc định chỉ info/warn/err) |
 
 Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi khởi động để bạn biết cấu hình đang chạy.
+
+### Log chẩn đoán (đọc khi có sự cố)
+
+- `[ytdlp:warn] ...` — warning của yt-dlp được bơm thẳng ra log (trước đây bị
+  `no_warnings=True` ẩn mất). Đây là chỗ thấy client nào bị bot-check, client
+  nào thiếu PO token, client nào bị bỏ qua.
+- `[music] client tier '<list>' bị chặn: ...` — tier đó fail ở mức client
+  (bot-check / thiếu token) → server tự nhảy sang tier kế tiếp
+  (`YTDLP_PLAYER_CLIENTS`).
+- `[music] resolve OK qua tier '<list>' (tier đã fail: ...)` — tier thắng.
+- `[music] resolved '<title>' (client=..., formats_client=[...],
+  format_id=..., abr=...)` — client Innertube thật sự sinh ra format đang dùng.
+- `[music] preload OK '<title>' (N B, Xs = resolve A + tải B (...) +
+  transcode C, cycle n, client=...)` — **chia thời gian theo công đoạn**:
+  dùng số này để biết nút thắt nằm ở mạng (resolve/tải) hay CPU (transcode)
+  thay vì tối ưu nhầm chỗ.
+- Chạy `python verify_resolve_ladder.py` để test lại ladder + route
+  (offline, không cần mạng).
 
 ### Chất lượng âm thanh
 
 Thứ tự ảnh hưởng thực tế: **âm sắc (EQ) > méo/clip > bitrate**. Trần cứng: 24 kHz → Nyquist 12 kHz, và loa nhỏ trên board không tái tạo được sub-bass.
+
+**Chi phí CPU của filter ≈ 0** (đo trên laptop dev, 120 s audio, chuỗi đầy đủ
+decode AAC → EQ + alimiter → MP3 24 kHz mono): **0,55 s có filter** vs
+**0,86 s không filter**; encode 5 phút ở 96k/128k/160k đều ~2,3 s. Nút thắt
+thời gian nằm ở mạng (resolve/tải) và CPU của instance, **không phải ở filter**
+— đừng xoá EQ để "tăng tốc", nó chỉ đổi âm sắc.
 
 **Preset (`AUDIO_PRESET`)** — đổi preset rồi restart là nghe khác ngay, nên cứ thử A/B:
 
@@ -171,11 +199,22 @@ Nếu VẪN còn lỗi bot-check dù đã có POT → đọc trường `pot_srv=
 - **`pot_srv=down`** — server POT không trả lời `/ping` lúc yt-dlp cần
   token (nghi deno bị OOM-kill trên instance 512MB): xem log `[start]`
   (WARNING hoặc ready muộn), restart service; lặp lại → tăng RAM instance.
-- **`pot_srv=up`** — PO token đã đi được nhưng Google vẫn chặn, theo thứ tự:
+- **`pot_srv=up`** — PO token đi được nhưng Google vẫn chặn. Server luôn bật
+  warning của yt-dlp, nên **đọc các dòng `[ytdlp:warn]` phía trên** để biết
+  client nào fail:
   1. **Xóa `YTDLP_COOKIES_B64`** rồi test — session cookies bị revoke có
      thể gây hard-block "Sign in" ngay cả khi đã có PO token.
-  2. Còn chặn → **xoay proxy** mới (nên dùng loại **sticky/residential** —
-     IP cố định) hoặc tạm xóa `YTDLP_PROXY` để test IP Render trực tiếp.
+  2. Thử nhóm client **không cần PO token**:
+     `YTDLP_PLAYER_CLIENTS='|visionos,tv,web_embedded'`. Nhóm này không đi
+     qua BotGuard nên loại được biến "PO token"; nếu **cả nhóm này cũng
+     fail** thì IP datacenter đã bị gắn cờ → cần cookies mới hoặc proxy
+     sticky/residential sạch.
+  3. Vì sao ladder mặc định xếp như vậy (theo yt-dlp đang pin trong
+     `requirements.txt`): `visionos`, `tv`, `web_embedded` **không cần** PO
+     token; `mweb`, `tv_simply`, `web` cần token web (bgutil sinh được);
+     `android_vr`, `android`, `ios` cần token Android/iOS mà bgutil **không**
+     sinh được → xếp cuối. Tên client không tồn tại trong yt-dlp (ví dụ
+     `tv_embedded`) chỉ bị bỏ qua kèm warning, không có tác dụng.
 
 Sửa bằng cookies (phương án dự phòng, khi PO token chưa dùng được):
 
@@ -257,6 +296,11 @@ MODE 2 — Local dev (run.bat, laptop mở):
 - **Đã test**: `/health` OK; `/stream/<id>.mp3` trả MP3 hợp lệ — cache sẵn
   thì có `Content-Length` ngay; đang preload thì nhận silence primer rồi
   chuyển mượt sang file. Tải trước về đĩa, không còn stream pipe sống.
+- **Đã test** (laptop dev, yt-dlp 2026.8.19): `/stream` trả primer sau ~0,1 s
+  ngay cả khi preload chưa resolve xong (route không còn resolve đồng bộ →
+  hết cảnh extract 2 lần); ladder client tự nhảy tier và log tier thắng /
+  tier bị chặn; dòng `resolved (... client=..., formats_client=[...])` và
+  `preload OK (... = resolve A + tải B + transcode C)` ra đúng số đo.
 - Direct URL googlevideo bị khóa theo IP + hết hạn → luôn stream qua server
   (IP của server quyết định); không trả direct URL cho robot.
 
