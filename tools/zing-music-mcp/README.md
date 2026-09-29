@@ -1,8 +1,8 @@
 # MCP Server Nhạc Việt cho Xe Robot XiaoZhi — Cloud Stream Proxy
 
-Server MCP tìm nhạc trên **YouTube** (qua `yt-dlp`) và phục vụ **file MP3
-đã tải sẵn qua HTTP** (FastAPI `FileResponse` / `StreamingResponse`), gộp
-cùng MCP server (`search_song`, `get_song_url`) trong **một process, một
+Server MCP tìm nhạc trên **SoundCloud + YouTube** (qua `yt-dlp`) và phục vụ
+**file MP3 đã tải sẵn qua HTTP** (FastAPI `FileResponse` / `StreamingResponse`),
+gộp cùng MCP server (`search_song`, `get_song_url`) trong **một process, một
 cổng** (`/mcp` streamable-http + `/stream/<id>.mp3` + `/health`).
 **Preload xuống đĩa**: `get_song_url` tải + transcode nền vào cache
 (`<tmp>/zing-music/<id>.mp3`, tối đa 20 bài) — robot mở URL là nhận file có
@@ -13,7 +13,7 @@ trước đây). Robot chỉ nhận 1 URL stream duy nhất và tự stream qua 
 
 | Tool | Input | Output |
 |------|-------|--------|
-| `search_song` | `keyword` (tên bài / ca sĩ) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `youtube_url` |
+| `search_song` | `keyword` (tên bài / ca sĩ) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url` (xếp theo độ khớp tên, ưu tiên SoundCloud) |
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
 
 Cơ chế: `get_song_url` bắt đầu **preload nền** ngay (resolve googlevideo +
@@ -45,17 +45,21 @@ trực tiếp (hành vi cũ, giảm cấp).
 | `YTDLP_PLAYER_CLIENTS` | Ladder player client: tier cách nhau `\|`, client trong tier cách nhau `,`, tier rỗng = client mặc định của yt-dlp. Mặc định `\|tv,web_embedded,tv_downgraded\|mweb,tv_simply,web\|android_vr,android,ios` (tier đầu để rỗng = yt-dlp tự chọn client) |
 | `YTDLP_DEBUG` | `1` = in cả message `[debug]` của yt-dlp (mặc định chỉ info/warn/err) |
 | `YTDLP_FORMAT_PROBE` | `0` = tắt bước thử tải 64 KB từ direct URL trước khi coi resolve thành công (mặc định `1`). Giữ bật để robot không nghe silence primer chỉ vì URL 403 |
-| `YTDLP_SOURCES` | Thứ tự nguồn nhạc, cách nhau `,`. Mặc định `youtube,soundcloud` |
+| `YTDLP_SOURCES` | Thứ tự nguồn nhạc, cách nhau `,`. Mặc định `soundcloud,youtube` — **SoundCloud là nguồn chính** |
 | `YTDLP_RESOLVE_CANDIDATES` | Số ứng viên mỗi nguồn thử thêm khi ứng viên đầu hỏng (mặc định `2`) |
 | `YTDLP_SOURCE_COOLDOWN` | Giây bỏ qua nguồn vừa gặp bot-check (mặc định `900`). `0` = tắt |
 
-### Nguồn nhạc: YouTube + SoundCloud (tự động chuyển)
+### Nguồn nhạc: SoundCloud (chính) + YouTube (dự phòng) — tự động chuyển
 
-`YTDLP_SOURCES` mặc định `youtube,soundcloud`. Nếu YouTube bị bot-check, server
-tự sang SoundCloud — **nguồn độc lập, không cần cookies/PO token, không bị
-chặn theo IP** (đã verify end-to-end: search → resolve → tải → MP3, không
-cookies/proxy). Đây là lớp dự phòng chính vì cookies/proxy chỉ giữ được vài
-bài rồi hỏng.
+`YTDLP_SOURCES` mặc định `soundcloud,youtube`. **SoundCloud là nguồn chính**
+vì nó không dùng cơ chế nào của YouTube: không cookies, không PO token,
+không bị bot-check theo IP (đã verify end-to-end: search → resolve → tải →
+MP3 4.5 MB trong 13s, hoàn toàn không auth). YouTube đứng sau làm dự phòng
+cho bài chỉ có trên đó và là nguồn cần cookies/POT khi IP bị gắn cờ.
+
+Lý do đổi thứ tự: cookies/proxy/POT chỉ giữ được vài bài rồi hỏng (Google
+revoke session khi IP đổi), nên phụ thuộc vào chúng là rủi ro dịch vụ. Với
+SoundCloud làm nguồn chính, YouTube bị chặn hoàn toàn vẫn hát được.
 
 - Nguồn vừa gặp bot-check bị bỏ qua `YTDLP_SOURCE_COOLDOWN` giây (mặc định
   15 phút) → request sau không mất thêm 10–20s chờ một nguồn đang chết.
@@ -63,8 +67,24 @@ bài rồi hỏng.
   khớp tên (bỏ dấu) — tránh trúng video cover/1 phút rồi bỏ cả bài.
 - SoundCloud ưu tiên format **progressive** (`http_mp3`) thay vì HLS: đi
   `_fetch_chunked` + `_transcode_local` (nhanh, resume được) thay vì
-  `_download_ffmpeg` trên m3u8 (chậm, reconnect nhiều).
+  `_download_ffmpeg` trên m3u8 (đo thật: m3u8 mất >60s và phải reconnect,
+  progressive xong trong 13s).
 - Xem nguồn đang bật / đang cooldown: `GET /health` → `sources`.
+
+#### Vì sao không dùng Zing MP3?
+
+Đã thử thật, ba rào chặn độc lập:
+
+1. **Search API trả `-403`** — `{"err":-403,"msg":"You don't have permission"}`.
+   apiKey hard-code trong extractor đã bị Zing thu hồi, Zing không công bố key
+   mới. Không search được thì không tìm được bài theo tên.
+2. **Bài VIP** — resolve bài thật ra
+   `The song is only for VIP accounts`; phần lớn nhạc Vpop là VIP.
+3. **Geo-restricted VN** — `_GEO_COUNTRIES=['VN']` trong extractor, cần
+   cookies để qua; Render đặt ở US nên thêm một tầng chặn nữa.
+
+Chỉ dùng được khi biết sẵn URL Zing + bài free + có cookies VN — không
+phù hợp làm nguồn nhạc tự động cho robot.
 
 Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi khởi động để bạn biết cấu hình đang chạy.
 

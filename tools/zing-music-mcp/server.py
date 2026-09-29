@@ -503,8 +503,19 @@ def _title_score(want: str, got: str) -> float:
 
 def _rank_candidates(source: str, title: str, n: int, skip: int = 0) -> list:
     """Top-n ket qua search cua `source`, sap xep theo do khop ten.
-    `skip` bo qua N ket qua dau (dung khi ladder da thu san video top-1)."""
-    res = _flat_search(source, title, max(n + skip, 3))
+
+    PHAI lay _FETCH_PER_SOURCE ket qua roi moi xep hang: thu tu tra ve cua
+    search khong tin (bai dung nam o vi tri #5). Lay chi n ket qua roi xep
+    la tu xep lai mot tap da sai thu tu.
+    `skip` bo qua N ket qua khop nhat (dung khi ladder da thu san top-1).
+
+    Dung cache candidate cua search_song truoc (cung truy van, con hieu luc
+    ~10s) — resolve thuong chay ngay sau search_song nen tranh lai mot vong
+    mang. Cache het han o duoi van search lai."""
+    hit = [r for r in _cached_candidates(title) if r.get("source") == source]
+    if len(hit) >= n + skip:
+        return hit[skip:skip + n]
+    res = _flat_search(source, title, max(_FETCH_PER_SOURCE, n + skip))
     scored = [(_title_score(title, r.get("title")), r) for r in res]
     scored.sort(key=lambda x: -x[0])
     return [r for _, r in scored[skip:skip + n]]
@@ -514,30 +525,92 @@ def _rank_candidates(source: str, title: str, n: int, skip: int = 0) -> list:
 # chinh de chat luong tot khong bi nguon phu lam loang, nguon sau lay phan con
 # trong. Khi nguon chinh bi chan/chan 0 ket qua -> nguon sau lap cho trong.
 _MAX_PER_SOURCE = 3
+# So ket qua GOI TAY DUNG ra moi nguon de xep hang. QUAN TRONG: thu tu tra ve
+# cua search KHONG tin — do khop ten moi tin. Do: query "Tam Thai Tu JACK J97"
+# tra ve "Tam Thai Tu - Jack - J97" (khop 100%) o vi tri #5, con 4 ket qua
+# dau la bai khac cung album (score 0.5-0.62). Lay thang 3 ket qua dau thi
+# agent nghe nham bai. Phai lay rong va xep lai.
+_FETCH_PER_SOURCE = 10
+# Nguon phu (YouTube) chi dung them 4-6s cho moi search. Neu nguon chinh da
+# co bai KHOP TUYET DOI (score 1.0) thi bo qua, de do tre chon bai du co
+# chat luong tot hon thi van hoi cac nguon sau.
+_SEARCH_ENOUGH_SCORE = float(os.environ.get("YTDLP_SEARCH_ENOUGH_SCORE", "0.95"))
+# So ket qua moi nguon giu trong cache candidate cho resolve dung lai (xem
+# _cache_candidates). Nho hon _MAX_PER_SOURCE de agent van thay du chon du
+# nguon chinh, lon hon RESOLVE_CANDIDATES de resolve co du ung vien thu.
+_CAND_KEEP = 8
 
 
 def _search_all(query: str, n: int = 5) -> list:
     out, seen = [], set()
     counts = {}
+    per_source = {}
     for src in SOURCES:
         if _source_cooldown_active(src):
             counts[src] = "cooldown"
             continue
-        res = _search_source(src, query, min(_MAX_PER_SOURCE, n))
-        counts[src] = len(res)
+        res = _search_source(src, query, _FETCH_PER_SOURCE)
+        # Xep theo do khop ten GOC de dung source dau tien; chi cat con
+        # _MAX_PER_SOURCE ket qua cho source do.
+        scored = [(_title_score(query, r.get("title")), r) for r in res]
+        scored.sort(key=lambda x: -x[0])
+        kept = scored[:_MAX_PER_SOURCE]
         if res:
             _clear_source_failed(src)
-        for r in res:
+        counts[src] = f"{len(res)}->{len(kept)}"
+        # Cache giu them ket qua (agent co the chon bai ngoai top-3).
+        per_source[src] = [r for _, r in scored[:_CAND_KEEP]]
+        for _, r in kept:
             dedup = (r.get("youtube_url") or r.get("title") or "").strip().lower()
             if dedup in seen:
                 continue
             seen.add(dedup)
             out.append(r)
+        if kept and kept[0][0] >= _SEARCH_ENOUGH_SCORE:
+            counts["early_exit"] = f"{kept[0][0]:.2f}"
+            break
+    _cache_candidates(query, per_source)
     sys.stderr.write(
         "[music] search " + ", ".join(
             f"{k}={v}" for k, v in counts.items()) + "\n")
     sys.stderr.flush()
     return out[:n]
+
+
+# ---------------------------------------------------------------------------
+# Cache candidate theo chuoi truy van: search_song vua tra ket qua, resolve
+# goi lai _flat_search cung truy van do -> ton them mot vong mang 5-10s cho
+# ket qua da co san. Giu lai danh sach xep hang theo ten cho moi truy van
+# (gioi han so luong de khong phinh bo nho).
+# ---------------------------------------------------------------------------
+_CAND_TTL = 600
+_CAND_MAX = 24
+_candidates = {}
+
+
+def _cache_candidates(query: str, per_source: dict) -> None:
+    """`per_source`: {source: [candidates theo thu tu do khop giam dan]}."""
+    merged = []
+    for src in SOURCES:
+        for r in per_source.get(src, []):
+            r.setdefault("source", src)
+            merged.append(r)
+    if not merged:
+        return
+    with _lock:
+        _candidates[query.strip().lower()] = {
+            "ts": time.time(), "list": merged[:_CAND_MAX]}
+
+
+def _cached_candidates(query: str) -> list:
+    with _lock:
+        hit = _candidates.get(query.strip().lower())
+        if not hit:
+            return []
+        if time.time() - hit["ts"] > _CAND_TTL:
+            _candidates.pop(query.strip().lower(), None)
+            return []
+    return hit["list"]
 
 
 # ---------------------------------------------------------------------------
@@ -615,12 +688,23 @@ _CLIENT_TIERS = _parse_client_ladder(
 # bi chan theo IP (da verify: search + resolve + CDN HLS tra ve binh thuong
 # tu IP datacenter). Nguon doc lap => service con song khi YouTube che.
 #
-# Zing MP3 KHONG dua vao day: extractor co san trong yt-dlp nhung (1) gioi
-# han geo VN (raise_geo_restricted) nen tren Render o US se that, (2) nhieu
-# bai la VIP, (3) khong co search API de tim bai.
+# Zing MP3 KHONG dua vao day — da do thi bang API that, khong phai do la doan:
+#   1. Search API tra {"err":-403,"msg":"You don't have permission"} — apiKey
+#      nhung trong extractor da bi Zing thu hoi, va Zing khong cong bo key moi.
+#      Khong co search = khong tim duoc bai theo ten (chi biet ID la moi lay).
+#   2. Resolve bai that: yeu cau tai khoan VIP ("The song is only for VIP
+#      accounts") — phan lon bai Vpop/Vpopular phai VIP, so voi robot la
+#      phan lon bai khong lay duoc.
+#   3. _GEO_COUNTRIES=['VN'] trong extractor: yeu cau cookies de qua
+#      geo-check; Render dat o US nen tang them mot tang chong chan nua.
+#   Ket qua: chi dung duoc khi biet san URL Zing + bai free + co cookies VN.
+# (Canh bao "khong ho tro zing" in o duoi, sau khi SOURCES da parse.)
 # ---------------------------------------------------------------------------
-_SOURCE_SEARCH_KEY = {"youtube": "ytsearch", "soundcloud": "scsearch"}
-_DEFAULT_SOURCES = "youtube,soundcloud"
+_SOURCE_SEARCH_KEY = {"soundcloud": "scsearch", "youtube": "ytsearch"}
+# SoundCloud đứng đầu: không cần cookies/PO token, không bị bot-check theo IP
+# (đã verify end-to-end), nên là nguồn ổn định nhất. YouTube để sau làm dự
+# phòng cho bài chỉ có trên YouTube. Đổi thứ tự bằng YTDLP_SOURCES.
+_DEFAULT_SOURCES = "soundcloud,youtube"
 
 
 def _parse_sources(raw: str) -> tuple:
@@ -636,10 +720,16 @@ def _parse_sources(raw: str) -> tuple:
             continue
         if s not in out:
             out.append(s)
-    return tuple(out) or ("youtube",)
+    return tuple(out) or (_DEFAULT_SOURCES.split(",")[0],)
 
 
 SOURCES = _parse_sources(os.environ.get("YTDLP_SOURCES", _DEFAULT_SOURCES))
+if "zing" in os.environ.get("YTDLP_SOURCES", "").lower():
+    # _parse_sources da bo qua 'zing' (khong nam trong _SOURCE_SEARCH_KEY) va
+    # in canh bao; dong nay nho la them mot lan nua cho biet ly do.
+    sys.stderr.write(
+        "[music] nguon 'zing' khong ho tro: search API -403 (apiKey bi thu hoi), "
+        "phan lon bai la VIP, va geo-restricted VN\n")
 # Format ưu tiên của SoundCloud: progressive http_mp3 (đi _fetch_chunked +
 # _transcode_local, nhanh/resume được) trước HLS hls_aac_160k (m3u8 -> phải
 # _download_ffmpeg, chậm và reconnect nhiều). Có fallback về bestaudio/best.
@@ -1082,12 +1172,30 @@ def _count_cache_files() -> int:
 
 def _prune_cache() -> None:
     """Giu toi da _CACHE_MAX_FILES bai (moi bai ~1-12 MB; Render free chi co
-    ~1 GB dia). Bo bai cu nhat truoc, khong dot bai dang preload."""
+    ~1 GB dia). Bo bai cu nhat truoc, khong dot bai dang preload.
+
+    Quan trong: file tam `.part` / `.src` CUNG phai duoc don. Preload that bai
+    giua chung (het deadline tai, ffmpeg loi) bo lai chung 5-12 MB ma khong
+    bao gio doi toi file `.mp3` -> khong bao gio duoc don, dia Render day dan
+    sau vai chuc bai. Chi xoa file cua bai KHONG con preload dang chay."""
     try:
         names = [n for n in os.listdir(MEDIA_DIR)
                  if n.endswith(".mp3") and not n.startswith("_")]
+        temps = [n for n in os.listdir(MEDIA_DIR)
+                 if n.endswith((".part", ".src")) and not n.startswith("_")]
     except OSError:
         return
+
+    for n in temps:
+        if _preload_state(os.path.splitext(n)[0]) == "running":
+            continue  # dang tai: dung xoa, con dung cho lan ghi hien tai
+        try:
+            os.remove(os.path.join(MEDIA_DIR, n))
+            sys.stderr.write(f"[music] prune temp: {n}\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+
     if len(names) <= _CACHE_MAX_FILES:
         return
 
@@ -1315,6 +1423,15 @@ def _preload_worker(key: str, title: str) -> None:
             sys.stderr.flush()
             time.sleep(2)
     _preload_state_update(key, state="failed", err=str(err)[:300])
+    # Don file tam cua bai nay + file tam cua cac bai that bai truoc do. Khong
+    # goi o nhanh thanh cong -> file .part/.src con lai tu bai that bai se
+    # ngay lai chua 5-12 MB ma khong bao gio duoc quet lai.
+    for p in (_part_path(key), _src_path(key)):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    _prune_cache()
 
 
 def _preload_start(key: str, title: str) -> None:
@@ -1626,8 +1743,9 @@ def search_song(keyword: str) -> str:
     """Tìm bài hát theo tên (hoặc tên + ca sĩ). Trả về tối đa 5 kết quả:
     title, uploader, duration_sec, source, youtube_url. Dùng get_song_url để
     lấy stream URL mp3 cho robot phát. Tìm trên TẤT CẢ nguồn đang bật
-    (mặc định YouTube + SoundCloud) nên khi YouTube bị bot-check vẫn còn
-    kết quả từ nguồn khác."""
+    (mặc định SoundCloud + YouTube) nên khi YouTube bị bot-check vẫn còn
+    kết quả từ nguồn khác. Kết quả đã xếp theo độ khớp tên, nguồn chính
+    (SoundCloud) đứng trước nếu bài trùng nhau."""
     res = _search_all(keyword, 5)
     sys.stderr.write(f"[music] search '{keyword}' -> {len(res)} ket qua\n")
     for r in res[:3]:
@@ -1669,6 +1787,10 @@ if __name__ == "__main__":
             f"[music] audio: {AUDIO_SAMPLE_RATE} Hz x{AUDIO_CHANNELS}, "
             f"{AUDIO_BITRATE} mp3, preset={AUDIO_PRESET}\n")
         sys.stderr.write(f"[music] filters: {AUDIO_FILTERS or '(none)'}\n")
+        sys.stderr.write(
+            f"[music] sources: {', '.join(SOURCES)} "
+            f"(candidates/nguon={RESOLVE_CANDIDATES}, "
+            f"cooldown={SOURCE_COOLDOWN}s)\n")
         sys.stderr.write(
             f"[music] cache: {MEDIA_DIR} (max {_CACHE_MAX_FILES} bai)\n")
         sys.stderr.flush()

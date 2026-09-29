@@ -31,10 +31,10 @@ services:
       # YTDLP_DEBUG=1 -> in ca message [debug] cua yt-dlp (mac dinh info/warn/err).
       # YTDLP_FORMAT_PROBE=0 -> tat buoc thu tai 64 KB tu direct URL truoc khi
       # coi resolve thanh cong (mac dinh bat).
-      # Nguon nhac — mac dinh trong server.py: youtube,soundcloud. Khi YouTube
-      # bi bot-check thi tu dong chuyen sang SoundCloud (khong can cookies/
-      # PO token). Xem /health -> sources.
-      #   YTDLP_SOURCES=youtube,soundcloud
+      # Nguon nhac — mac dinh trong server.py: soundcloud,youtube (SoundCloud
+      # la nguon CHINH: khong can cookies/PO token, khong bi bot-check theo IP;
+      # YouTube de sau lam du phong cho bai chi co tren do). Xem /health -> sources.
+      #   YTDLP_SOURCES=soundcloud,youtube
       #   YTDLP_SOURCE_COOLDOWN=900  -> bo qua nguon vua bi chan 15 phut
       #   YTDLP_RESOLVE_CANDIDATES=2  -> so video thu them moi nguon
       # Proxy tuy chon neu co (vd http://user:pass@host:port).

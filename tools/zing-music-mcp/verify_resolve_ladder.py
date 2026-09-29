@@ -134,8 +134,9 @@ check("_parse_sources bo qua nguon la",
       server._parse_sources("youtube,zingmp3") == ("youtube",))
 check("_parse_sources giu thu tu",
       server._parse_sources("soundcloud,youtube") == ("soundcloud", "youtube"))
-check("_parse_sources rong -> fallback youtube",
-      server._parse_sources("") == ("youtube",))
+check("_parse_sources rong -> fallback nguon mac dinh dau",
+      server._parse_sources("") == (server._DEFAULT_SOURCES.split(",")[0],),
+      str(server._parse_sources("")))
 check("mac dinh co soundcloud (nguon du phong)",
       "soundcloud" in server._DEFAULT_SOURCES.split(","),
       server._DEFAULT_SOURCES)
@@ -228,7 +229,11 @@ class Tier3YDL(FakeYDL):
 
 real_tiers = server._CLIENT_TIERS
 real_probe = server._probe_direct_url
+real_sources3b = server.SOURCES
 server._CLIENT_TIERS = server._parse_client_ladder("|visionos|visionos,tv")
+# Test rieng phan YouTube -> chi bat nguon nay, khong de mac dinh
+# (soundcloud,youtube) chen them calls cua nguon khac vao danh sach.
+server.SOURCES = ("youtube",)
 yt_dlp.YoutubeDL = Tier3YDL
 server._probe_direct_url = lambda entry: True
 FakeYDL.calls = []
@@ -238,6 +243,7 @@ try:
           FakeYDL.calls == [None, ["visionos"], ["tv"]], f"calls={FakeYDL.calls}")
 finally:
     server._CLIENT_TIERS = real_tiers
+    server.SOURCES = real_sources3b
     with server._lock:
         server._resolved.pop("verifykey4", None)
 
@@ -295,6 +301,68 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# 6. _search_all: xep hang theo do khop ten + early-exit + gioi han moi nguon
+# ---------------------------------------------------------------------------
+# Bug thuc te: query "Tam Thai Tu JACK J97" -> bai DUNG (khop 100%) nam o vi
+# tri #5, 4 ket qua dau la bai khac cung album. Lay top-N theo thu tu search
+# -> agent nghe nham bai.
+SC_RESULTS = [
+    {"title": "JACK - J97 | HOA TRONG ĐÁI LỐI (OFFICIAL MV)", "uploader": "J97",
+     "duration_sec": 200, "source": "soundcloud",
+     "youtube_url": "https://soundcloud.com/x/wrong1"},
+    {"title": "JACK - J97 | NGƯỜI DƯNG (Album TAM THÁI TỬ)", "uploader": "J97",
+     "duration_sec": 200, "source": "soundcloud",
+     "youtube_url": "https://soundcloud.com/x/wrong2"},
+    {"title": "JACK - J97 | TAM THÁI TỬ", "uploader": "J97",
+     "duration_sec": 230, "source": "soundcloud",
+     "youtube_url": "https://soundcloud.com/x/exact"},
+    {"title": "JACK - J97 | TAM THÁI TỬ (COVER)", "uploader": "zzz",
+     "duration_sec": 230, "source": "soundcloud",
+     "youtube_url": "https://soundcloud.com/x/wrong3"},
+]
+real_search_source = server._search_source
+server._search_source = lambda src, q, n: list(SC_RESULTS)[:n]
+real_sources6 = server.SOURCES
+try:
+    server.SOURCES = ("soundcloud", "youtube")
+    res = server._search_all("Tam Thái Tử JACK J97", 5)
+    check("_search_all: bai khop 100% duoc day len dau",
+          res and res[0]["title"] == "JACK - J97 | TAM THÁI TỬ",
+          res[0]["title"] if res else "rong")
+    check("_search_all: chi giu _MAX_PER_SOURCE ket qua moi nguon",
+          len(res) == server._MAX_PER_SOURCE, f"n={len(res)}")
+    check("_search_all: early-exit khi nguon dau co bai khop tuyet doi "
+          "(khong goi nguon sau)",
+          all(r["source"] == "soundcloud" for r in res),
+          str({r["source"] for r in res}))
+
+    # Khong co bai khop tuyet thi phai van hoi nguon sau (khong early-exit).
+    seen_src = []
+
+    def _fake_search(src, q, n):
+        seen_src.append(src)
+        if src == "soundcloud":
+            return [{"title": "KHAC KHAU - bai hat y hoc", "uploader": "x",
+                     "duration_sec": 100, "source": src,
+                     "youtube_url": "https://soundcloud.com/x/nomatch"}]
+        return [{"title": "Tam Thái Tử JACK J97", "uploader": "y",
+                 "duration_sec": 230, "source": src,
+                 "youtube_url": "https://youtube.com/watch?v=abc"}]
+
+    server._search_source = _fake_search
+    seen_src.clear()
+    res2 = server._search_all("Tam Thái Tử JACK J97", 5)
+    check("_search_all: khong co bai khop -> van hoi nguon sau",
+          seen_src == ["soundcloud", "youtube"], f"{seen_src}")
+    check("_search_all: ket qua cua nguon sau duoc giu",
+          any(r["source"] == "youtube" for r in res2),
+          str([r["source"] for r in res2]))
+finally:
+    server._search_source = real_search_source
+    server.SOURCES = real_sources6
+
+
+# ---------------------------------------------------------------------------
 # 5. _stream_body voi entry=None (duong route thuc te)
 # ---------------------------------------------------------------------------
 if not server.FFMPEG or not os.path.exists(server.FFMPEG):
@@ -329,6 +397,44 @@ else:
     finally:
         server._resolve = real_resolve
         server._preload_state = real_state
+
+# ---------------------------------------------------------------------------
+# 7. _prune_cache don file tam (.part/.src) cua bai that bai
+# Bug that: preload fail giua chung bo lai 5-12 MB o file .part/.src, nhung
+# _prune_cache chi quet .mp3 -> file tam khong BAO GIO duoc don, dia day dan
+# (Render free chi ~1 GB). Thu cong thuc da chay lai ba lan khi server that
+# bai nhieu bai lien tiep.
+# ---------------------------------------------------------------------------
+_dir = server.MEDIA_DIR
+_p = server._part_path("tmpprunekey")
+_s = server._src_path("tmpprunekey")
+with open(_p, "wb") as f:
+    f.write(b"x" * 1000)
+with open(_s, "wb") as f:
+    f.write(b"y" * 2000)
+check("setup: file tam .part/.src ton tai truoc prune",
+      os.path.exists(_p) and os.path.exists(_s))
+server._prune_cache()
+check("prune xoa file tam .part", not os.path.exists(_p))
+check("prune xoa file tam .src", not os.path.exists(_s))
+
+# Nhung file tam cua bai DANG preload phai giu nguyen (con dung cho ghi).
+_p2 = server._part_path("runningprunekey")
+with open(_p2, "wb") as f:
+    f.write(b"z" * 1000)
+with server._lock:
+    server._preload["runningprunekey"] = {"state": "running", "t0": 0, "err": ""}
+try:
+    server._prune_cache()
+    check("prune GIU file tam cua bai dang preload", os.path.exists(_p2))
+finally:
+    with server._lock:
+        server._preload.pop("runningprunekey", None)
+    try:
+        os.remove(_p2)
+    except OSError:
+        pass
+
 
 print()
 if FAILED:
