@@ -45,6 +45,26 @@ trực tiếp (hành vi cũ, giảm cấp).
 | `YTDLP_PLAYER_CLIENTS` | Ladder player client: tier cách nhau `\|`, client trong tier cách nhau `,`, tier rỗng = client mặc định của yt-dlp. Mặc định `\|tv,web_embedded,tv_downgraded\|mweb,tv_simply,web\|android_vr,android,ios` (tier đầu để rỗng = yt-dlp tự chọn client) |
 | `YTDLP_DEBUG` | `1` = in cả message `[debug]` của yt-dlp (mặc định chỉ info/warn/err) |
 | `YTDLP_FORMAT_PROBE` | `0` = tắt bước thử tải 64 KB từ direct URL trước khi coi resolve thành công (mặc định `1`). Giữ bật để robot không nghe silence primer chỉ vì URL 403 |
+| `YTDLP_SOURCES` | Thứ tự nguồn nhạc, cách nhau `,`. Mặc định `youtube,soundcloud` |
+| `YTDLP_RESOLVE_CANDIDATES` | Số ứng viên mỗi nguồn thử thêm khi ứng viên đầu hỏng (mặc định `2`) |
+| `YTDLP_SOURCE_COOLDOWN` | Giây bỏ qua nguồn vừa gặp bot-check (mặc định `900`). `0` = tắt |
+
+### Nguồn nhạc: YouTube + SoundCloud (tự động chuyển)
+
+`YTDLP_SOURCES` mặc định `youtube,soundcloud`. Nếu YouTube bị bot-check, server
+tự sang SoundCloud — **nguồn độc lập, không cần cookies/PO token, không bị
+chặn theo IP** (đã verify end-to-end: search → resolve → tải → MP3, không
+cookies/proxy). Đây là lớp dự phòng chính vì cookies/proxy chỉ giữ được vài
+bài rồi hỏng.
+
+- Nguồn vừa gặp bot-check bị bỏ qua `YTDLP_SOURCE_COOLDOWN` giây (mặc định
+  15 phút) → request sau không mất thêm 10–20s chờ một nguồn đang chết.
+- Mỗi nguồn thử tối đa `YTDLP_RESOLVE_CANDIDATES` video, xếp hạng theo độ
+  khớp tên (bỏ dấu) — tránh trúng video cover/1 phút rồi bỏ cả bài.
+- SoundCloud ưu tiên format **progressive** (`http_mp3`) thay vì HLS: đi
+  `_fetch_chunked` + `_transcode_local` (nhanh, resume được) thay vì
+  `_download_ffmpeg` trên m3u8 (chậm, reconnect nhiều).
+- Xem nguồn đang bật / đang cooldown: `GET /health` → `sources`.
 
 Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi khởi động để bạn biết cấu hình đang chạy.
 
@@ -68,6 +88,13 @@ Server in ra dòng `[music] audio: 24000 Hz x1, 160k mp3, filters='...'` khi kh�
   tier đó bị bỏ (`tier '...' cho URL khong tai duoc -> thu tier ke tiep`) và
   thử tier client kế tiếp — nhờ vậy robot không rơi vào cảnh chỉ nghe
   silence primer rồi im.
+- `[music] search youtube=3, soundcloud=0` — số kết quả mỗi nguồn (giá trị
+  chữ `cooldown` = nguồn đang bị bỏ qua tạm).
+- `[music] nguon 'youtube' that bai sau 12s` → `[music] resolve OK
+  nguon='soundcloud' sau 4s (2/2 nguon)` — YouTube hỏng, đã tự sang nguồn
+  sau. Nếu thấy `đang cooldown` ở request sau thì nguồn đó vừa bị chặn.
+- `[music] soundcloud OK '<title>' (format_id=http_mp3_1_0)` — nguồn dự phòng
+  thành công.
 - Chạy `python verify_resolve_ladder.py` để test lại ladder + route
   (offline, không cần mạng).
 
@@ -170,6 +197,10 @@ nối OUT tới `MCP_ENDPOINT` (wss api.xiaozhi.me) để đăng ký 2 tool nh�
 IP datacenter của Render bị YouTube gắn cờ → bước `_resolve` (lấy direct URL)
 thất bại, log thấy đúng câu lỗi này. `search_song` vẫn chạy (extract_flat
 không bị check) nên robot "tìm được bài nhưng không phát được".
+
+**Cách xử lý đầu tiên (mặc định, không cần làm gì):** server tự chuyển sang
+**SoundCloud** — xem mục "Nguồn nhạc: YouTube + SoundCloud" ở trên. Chỉ khi
+cả hai nguồn đều hỏng thì mới cần đọc tiếp phần dưới.
 
 ### Giải pháp lâu dài (đã tích hợp): PO token — không cần export cookies
 

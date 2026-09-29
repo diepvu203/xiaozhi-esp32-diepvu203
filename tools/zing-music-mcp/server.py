@@ -3,8 +3,9 @@
 XiaoZhi Music MCP Server — Preload to disk + Cloud Stream Proxy.
 
 Kiến trúc:
-  - MCP tool `search_song(keyword)`: tìm bài trên YouTube (yt-dlp, có fallback
-    scrape HTML khi bị anti-bot).
+  - MCP tool `search_song(keyword)`: tìm bài trên TẤT CẢ nguồn đang bật
+    (mặc định YouTube + SoundCloud qua yt-dlp; YouTube có fallback scrape
+    HTML khi bị anti-bot).
   - MCP tool `get_song_url(title)`: trả NGAY stream URL công khai
     `<PUBLIC_BASE>/stream/<id>.mp3` (id = md5(title)) và START preload nền:
     resolve -> tải source (chunk 1 MB, có Range/resume) -> transcode MP3 ->
@@ -40,6 +41,13 @@ Cấu hình qua biến môi trường:
   YTDLP_DEBUG    — "1" để in cả message [debug] của yt-dlp
                   (mặc định: info/warn/err — warning theo client là manh mối
                   chính để chẩn đoán bot-check).
+  YTDLP_SOURCES  — danh sách nguồn nhạc, cách nhau bằng "," theo thứ tự ưu
+                  tiên. Mặc định "youtube,soundcloud". SoundCloud không cần
+                  cookies/PO token nên giữ service sống khi YouTube bị chặn.
+  YTDLP_RESOLVE_CANDIDATES — số ứng viên mỗi nguồn thử thêm khi ứng viên
+                  đầu hỏng (mặc định 2). ứng viên xếp hạng theo độ khớp tên.
+  YTDLP_SOURCE_COOLDOWN — giây bỏ qua nguồn vừa gặp bot-check (mặc định
+                  900 = 15 phút). 0 = tắt.
 
 Chạy: python server.py
 """
@@ -56,6 +64,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -407,40 +416,128 @@ def _search_youtube_html(query: str, n: int) -> list:
     return results[:n]
 
 
-def _search_youtube(query: str, n: int) -> list:
+def _mk_result(e: dict, source: str) -> dict:
+    return {
+        "title": e.get("title"),
+        "uploader": e.get("uploader") or e.get("channel") or e.get("creator"),
+        "duration_sec": e.get("duration"),
+        "source": source,
+        # TEN TRUONG GIU NGUYEN PHIEN BAN CU: agent cu/van doc key nay, va
+        # URL nay co the tro toi bat ky nguon nao (khong con chi YouTube).
+        "youtube_url": e.get("url") or e.get("webpage_url"),
+    }
+
+
+def _flat_search(source: str, query: str, n: int, retries: int = 2) -> list:
+    """Search phang (extract_flat, KHONG download) tren mot nguon.
+    Dung chung cho search_song va cho viec xep hang candidate khi resolve.
+
+    LUON truyen "<key><n>:<query>" lam target thuc (khong dung default_search):
+    default_search chi prepend khi yt-dlp KHONG parse duoc input la URL, va
+    o do generic extractor nhan "scsearch3:..." -> tra 0 ket qua im lang.
+    Co "scsearch3:" trong chinh URL thi SearchInfoExtractor bat duoc dung.
+    """
+    target = f"{_SOURCE_SEARCH_KEY[source]}{n}:{query}"
     opts = {
         "quiet": True,
-        "extract_flat": True,
-        "default_search": f"ytsearch{n}",
+        "extract_flat": "in_playlist",
+        "noplaylist": True,
     }
     _apply_ydl_auth(opts)
-    entries = []
-    for attempt in range(2):
+    for attempt in range(retries):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=False)
-            entries = info.get("entries") or []
+                info = ydl.extract_info(target, download=False)
+            entries = [e for e in (info.get("entries") or []) if e]
             if entries:
-                break
-        except Exception:
-            entries = []
-        time.sleep(1 + attempt)
-    if not entries:
+                return [_mk_result(e, source) for e in entries]
+        except Exception:  # noqa: BLE001 - thu lai roi tra rong
+            pass
+        if attempt + 1 < retries:
+            time.sleep(1 + attempt)
+    return []
+
+
+def _search_source(source: str, query: str, n: int) -> list:
+    if source == "youtube":
+        res = _flat_search(source, query, n)
+        if res:
+            return res
+        # ytsearch bi chan -> scrape trang results (van dung khi Cloudflare/
+        # anti-bot, nhanh hon viec doi nguon).
         try:
-            return _search_youtube_html(query, n)
-        except Exception:
+            html = _search_youtube_html(query, n)
+        except Exception:  # noqa: BLE001
             return []
-    out = []
-    for e in entries:
-        if not e:
+        for r in html:
+            r["source"] = "youtube"
+        return html
+    return _flat_search(source, query, n)
+
+
+def _looks_like_url(text: str) -> bool:
+    t = str(text or "").strip().lower()
+    return t.startswith(("http://", "https://", "www."))
+
+
+# ---------------------------------------------------------------------------
+# Xep hang candidate: bai nao khop ten duoc yeu cau nhat thi thu truoc.
+# Search phang tra ve nhieu ket qua; "ytsearch1"/flat top-1 khong phai luon
+# la bai dung (cover, remix, live, 1 phut) -> thu them candidate tiep theo
+# thay vi bo cua ca bai.
+# ---------------------------------------------------------------------------
+def _norm_title(s: str) -> str:
+    s = unicodedata.normalize("NFKD", str(s or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
+
+
+def _title_score(want: str, got: str) -> float:
+    """Dice tren tap token (bo dau). 1.0 = trung het ten."""
+    a = set(_norm_title(want).split())
+    b = set(_norm_title(got).split())
+    if not a or not b:
+        return 0.0
+    return 2.0 * len(a & b) / (len(a) + len(b))
+
+
+def _rank_candidates(source: str, title: str, n: int, skip: int = 0) -> list:
+    """Top-n ket qua search cua `source`, sap xep theo do khop ten.
+    `skip` bo qua N ket qua dau (dung khi ladder da thu san video top-1)."""
+    res = _flat_search(source, title, max(n + skip, 3))
+    scored = [(_title_score(title, r.get("title")), r) for r in res]
+    scored.sort(key=lambda x: -x[0])
+    return [r for _, r in scored[skip:skip + n]]
+
+
+# So ket qua moi nguon dua vao list cua search_song:giu 3 ket qua cua nguon
+# chinh de chat luong tot khong bi nguon phu lam loang, nguon sau lay phan con
+# trong. Khi nguon chinh bi chan/chan 0 ket qua -> nguon sau lap cho trong.
+_MAX_PER_SOURCE = 3
+
+
+def _search_all(query: str, n: int = 5) -> list:
+    out, seen = [], set()
+    counts = {}
+    for src in SOURCES:
+        if _source_cooldown_active(src):
+            counts[src] = "cooldown"
             continue
-        out.append({
-            "title": e.get("title"),
-            "uploader": e.get("uploader") or e.get("channel"),
-            "duration_sec": e.get("duration"),
-            "youtube_url": e.get("url") or e.get("webpage_url"),
-        })
-    return out
+        res = _search_source(src, query, min(_MAX_PER_SOURCE, n))
+        counts[src] = len(res)
+        if res:
+            _clear_source_failed(src)
+        for r in res:
+            dedup = (r.get("youtube_url") or r.get("title") or "").strip().lower()
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            out.append(r)
+    sys.stderr.write(
+        "[music] search " + ", ".join(
+            f"{k}={v}" for k, v in counts.items()) + "\n")
+    sys.stderr.flush()
+    return out[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +605,76 @@ _CLIENT_TIERS = _parse_client_ladder(
 
 
 # ---------------------------------------------------------------------------
+# Nguon nhac (YouTube + SoundCloud) — day la lop DAN PHONG chinh khong phai
+# phu luc.
+#
+# Ly do: cookies/proxy/POT chi giai quyet tam thoi. Da xay ra nhieu lan
+# "duoc vai bua lai hong": YouTube chan IP datacenter (bot-check), cookie het
+# han, proxy doi IP lam session bi revoke. Service nhac bi bo rat nhieu.
+# SoundCloud thi nguon doc lap: khong can cookies, khong can PO token, khong
+# bi chan theo IP (da verify: search + resolve + CDN HLS tra ve binh thuong
+# tu IP datacenter). Nguon doc lap => service con song khi YouTube che.
+#
+# Zing MP3 KHONG dua vao day: extractor co san trong yt-dlp nhung (1) gioi
+# han geo VN (raise_geo_restricted) nen tren Render o US se that, (2) nhieu
+# bai la VIP, (3) khong co search API de tim bai.
+# ---------------------------------------------------------------------------
+_SOURCE_SEARCH_KEY = {"youtube": "ytsearch", "soundcloud": "scsearch"}
+_DEFAULT_SOURCES = "youtube,soundcloud"
+
+
+def _parse_sources(raw: str) -> tuple:
+    out = []
+    for s in str(raw or "").split(","):
+        s = s.strip().lower()
+        if not s:
+            continue
+        if s not in _SOURCE_SEARCH_KEY:
+            sys.stderr.write(
+                f"[music] YTDLP_SOURCES: bo qua nguon '{s}' (hop le: "
+                f"{', '.join(_SOURCE_SEARCH_KEY)})\n")
+            continue
+        if s not in out:
+            out.append(s)
+    return tuple(out) or ("youtube",)
+
+
+SOURCES = _parse_sources(os.environ.get("YTDLP_SOURCES", _DEFAULT_SOURCES))
+# Format ưu tiên của SoundCloud: progressive http_mp3 (đi _fetch_chunked +
+# _transcode_local, nhanh/resume được) trước HLS hls_aac_160k (m3u8 -> phải
+# _download_ffmpeg, chậm và reconnect nhiều). Có fallback về bestaudio/best.
+_SC_FORMAT = "bestaudio[protocol^=http]/bestaudio/best"
+# So candidate (ung vien) moi nguon thu them khi ung vien dau that bai.
+RESOLVE_CANDIDATES = max(1, int(os.environ.get("YTDLP_RESOLVE_CANDIDATES", "2")))
+# Nguon vua gap bot-check -> tam bo qua bao giay (mac dinh 15 phut) cho cac
+# request sau. Ly do: YouTube that bai ton mot ladder 4 tier ~10-20s moi bai;
+# khi IP da bi chan thi doi lan tiep cung that. Source nao giu duoc thi thu
+# lai; dat 0 de tat cooldown (moi request deu thu lai).
+SOURCE_COOLDOWN = max(0, int(os.environ.get("YTDLP_SOURCE_COOLDOWN", "900")))
+_source_fail_until = {}
+_src_lock = threading.Lock()
+
+
+def _source_cooldown_active(source: str) -> bool:
+    until = _source_fail_until.get(source)
+    if not until or until <= time.time():
+        return False
+    return True
+
+
+def _mark_source_failed(source: str) -> None:
+    if SOURCE_COOLDOWN <= 0:
+        return
+    with _src_lock:
+        _source_fail_until[source] = time.time() + SOURCE_COOLDOWN
+
+
+def _clear_source_failed(source: str) -> None:
+    with _src_lock:
+        _source_fail_until.pop(source, None)
+
+
+# ---------------------------------------------------------------------------
 # Probe direct URL truoc khi coi resolve la thanh cong
 # ---------------------------------------------------------------------------
 # yt-dlp co the tra ve URL ma googlevideo se 403 khi tai that (format can GVS
@@ -565,7 +732,7 @@ def _probe_direct_url(entry: dict) -> bool:
         return True
 
 
-def _entry_from_info(title: str, info: dict) -> dict:
+def _entry_from_info(title: str, info: dict, source: str = "youtube") -> dict:
     """Chon format tot nhat tu info cua yt-dlp -> entry (direct_url + headers)."""
     chosen = info["entries"][0] if "entries" in info else info
     direct = chosen.get("url")
@@ -593,6 +760,7 @@ def _entry_from_info(title: str, info: dict) -> dict:
         "title": chosen.get("title") or title,
         "uploader": chosen.get("uploader") or chosen.get("channel"),
         "duration": chosen.get("duration"),
+        "source": source,
         "client": (chosen.get("__yt_dlp_client")
                    or info.get("__yt_dlp_client")
                    or (clients_seen[0] if len(clients_seen) == 1 else "")
@@ -607,18 +775,28 @@ def _entry_from_info(title: str, info: dict) -> dict:
     }
 
 
-def _resolve(key: str, title: str) -> dict:
-    with _lock:
-        cached = _resolved.get(key)
-    if cached and cached.get("expires", 0) > time.time():
-        return cached
-    base_opts = {
-        "quiet": True,
-        # Ưu tiên nguồn tốt hơn để giảm "generation loss" khi encode lại MP3
-        # (Opus ~160k / AAC 128k tốt hơn hẳn mp3 128k của YouTube).
-        "default_search": "ytsearch1",
-        "noplaylist": True,
-    }
+def _extract_one(target: str, title: str, source: str, clients=(), fmt=None,
+                 search_key: str = None) -> dict:
+    """Mot lan extract cua yt-dlp -> entry (direct_url + headers).
+    `target` la URL cua bai (candidate) hoac chuoi ten (khi search_key du dung
+    default_search cua yt-dlp de tim bai)."""
+    opts = {"quiet": True, "noplaylist": True}
+    if search_key:
+        opts["default_search"] = search_key
+    if fmt:
+        opts["format"] = fmt
+    if clients:
+        opts["extractor_args"] = {
+            "youtube": {"player_client": list(clients)}}
+    _apply_ydl_auth(opts)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(target, download=False)
+    if not info:
+        raise yt_dlp.utils.DownloadError("extract trả về rỗng")
+    return _entry_from_info(title, info, source)
+
+
+def _resolve_youtube(title: str) -> dict:
     # Ladder phòng hờ "Requested format is not available": một số video không
     # khớp selector hẹp (formats bị drop khi thiếu JS runtime / format lạ)
     # -> nới dần bestaudio[abr<=192] -> bestaudio -> best -> default, mới bỏ cuộc.
@@ -628,11 +806,11 @@ def _resolve(key: str, title: str) -> dict:
         "best",
         None,  # selector mặc định của yt-dlp
     )
-    info = None
     last_err = None
     won_via = ""
     tried = []
     entry = None
+    got_info = False
     attempted = set()
     # Vòng lặp 2 chiều: tier client (rỗng = client mặc định của yt-dlp) ×
     # format selector. Bot-check / thiếu PO token là lỗi mức CLIENT -> đổi
@@ -645,18 +823,10 @@ def _resolve(key: str, title: str) -> dict:
             continue
         attempted.update(todo)
         for fmt in _format_tiers:
-            opts = dict(base_opts)
-            if fmt:
-                opts["format"] = fmt
-            if clients:
-                opts["extractor_args"] = {
-                    "youtube": {"player_client": list(todo)}}
-            _apply_ydl_auth(opts)
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(title, download=False)
-                if not info:
-                    raise yt_dlp.utils.DownloadError("extract trả về rỗng")
+                entry = _extract_one(title, title, "youtube", todo, fmt,
+                                     search_key="ytsearch1")
+                got_info = True
                 break
             except yt_dlp.utils.DownloadError as e:
                 last_err = e
@@ -668,33 +838,46 @@ def _resolve(key: str, title: str) -> dict:
                     break
                 if "Requested format is not available" not in str(e):
                     raise  # lỗi khác (unavailable, HTTP...) -> nổi lên ngay
-        if info:
-            try:
-                cand = _entry_from_info(title, info)
-            except RuntimeError as e:
-                last_err = e
-                cand = None
+        if got_info:
             # URL chưa tải được thật (403...) thì tier này vô dụng: robot chỉ
             # nghe được silence primer -> thử tier client kế tiếp.
-            if cand is not None and _probe_direct_url(cand):
-                entry = cand
+            if _probe_direct_url(entry):
                 won_via = label
                 break
-            if cand is not None:
-                sys.stderr.write(
-                    f"[music] tier '{label}' cho URL khong tai duoc "
-                    f"-> thu tier ke tiep\n")
-                sys.stderr.flush()
-            info = None
+            sys.stderr.write(
+                f"[music] tier '{label}' cho URL khong tai duoc "
+                f"-> thu tier ke tiep\n")
+            sys.stderr.flush()
+            entry = None
+            got_info = False
         if label not in tried:
             tried.append(label)
+    # Hết cả ladder -> thử vài video khác cùng tên (xếp hạng theo độ khớp tên).
+    # ytsearch1 hay trúng video 1 phút/live/cover -> thay vì bỏ cả bài thì thử
+    # bài kế tiếp. Bỏ qua kết quả #1 vì ladder vừa thử nó rồi.
+    if entry is None and not _is_client_level_err(last_err):
+        for cand in _rank_candidates("youtube", title, RESOLVE_CANDIDATES,
+                                     skip=1):
+            try:
+                cand_entry = _extract_one(
+                    cand["youtube_url"], cand.get("title") or title,
+                    "youtube", fmt=_format_tiers[0])
+            except Exception as e:  # noqa: BLE001 - thử video tiếp theo
+                last_err = e
+                sys.stderr.write(
+                    f"[music] candidate youtube that bai: {str(e)[:120]}\n")
+                sys.stderr.flush()
+                continue
+            if _probe_direct_url(cand_entry):
+                entry = cand_entry
+                tried.append("candidate")
+                won_via = "candidate"
+                break
     if entry is not None:
         if entry.get("client") in ("", "n/a"):
             # Nhánh HLS/m3u8 không mang '__yt_dlp_client' -> dùng tên tier làm
             # manh mối client.
             entry["client"] = won_via
-        with _lock:
-            _resolved[key] = entry
         sys.stderr.write(
             f"[music] resolve OK qua tier '{won_via}' "
             f"(tier đã fail: {', '.join(tried) if tried else 'không'}), "
@@ -705,58 +888,141 @@ def _resolve(key: str, title: str) -> dict:
             f"format_id={entry.get('format_id') or 'n/a'})\n")
         sys.stderr.flush()
         return entry
-    if entry is None:
-        _srv = _pot_server_up() if POT_AVAILABLE else False
+    _srv = _pot_server_up() if POT_AVAILABLE else False
+    sys.stderr.write(
+        f"[music] resolve give-up '{title}': cookies="
+        f"{'on' if COOKIES_FILE else 'off'}, proxy="
+        f"{'on' if YTDLP_PROXY else 'off'}, "
+        f"pot={'on' if POT_AVAILABLE else 'off'}, "
+        f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}, "
+        f"tier_da_thu={tried or ['default']}, "
+        f"last={last_err}\n")
+    _hint = ""
+    if last_err is not None and any(
+            s in str(last_err)
+            for s in ("not a bot", "Sign in to confirm")):
+        # Bot-check sống sót qua TOÀN BỘ tier client.
+        if POT_AVAILABLE and not _srv:
+            # Plugin đã cài nhưng server POT không trả lời lúc yt-dlp cần
+            # token -> provider thất bại (đã thấy qua dòng [ytdlp:warn]).
+            _hint = (
+                " -> POT server DOWN khi yt-dlp cần PO token "
+                "(127.0.0.1:4416 không /ping — nghi deno OOM-kill trên "
+                "512MB): xem log [start], restart service; lặp lại -> "
+                "tăng RAM instance")
+        elif POT_AVAILABLE:
+            _hint = (
+                " -> PO token có nhưng vẫn bot-check. Đọc các dòng "
+                "[ytdlp:warn] phía trên để biết client nào fail: nếu CẢ "
+                "nhóm không cần token (visionos/tv/web_embedded) cũng "
+                "fail thì IP datacenter đã bị gắn cờ -> cần "
+                "YTDLP_COOKIES_B64 mới hoặc proxy sticky/residential "
+                "sạch; nếu chỉ nhóm cần token fail thì lỗi ở provider "
+                "POT / JS runtime (deno)")
+        elif COOKIES_FILE:
+            _hint = (
+                " -> cookie YouTube hết hạn/bị revoke: export lại "
+                "cookies.txt rồi cập nhật env YTDLP_COOKIES_B64 "
+                "trên Render (xem README)")
+        else:
+            _hint = (
+                " -> chưa có PO token/cookies: cài bgutil plugin "
+                "(requirements.txt) hoặc đặt env YTDLP_COOKIES_B64 "
+                "(xem README)")
+    raise RuntimeError(
+        f"youtube: không lấy được format nào cho '{title}' "
+        f"(tier_da_thu={tried or ['default']}, "
+        f"deno={'yes' if shutil.which('deno') else 'NO'}, "
+        f"yt-dlp={yt_dlp.version.__version__}, "
+        f"cookies={'on' if COOKIES_FILE else 'off'}, "
+        f"proxy={'on' if YTDLP_PROXY else 'off'}, "
+        f"pot={'on' if POT_AVAILABLE else 'off'}, "
+        f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}): "
+        f"{last_err}{_hint}")
+
+
+def _resolve_soundcloud(title: str) -> dict:
+    """SoundCloud: không có client ladder, không cần cookies/POT, không bị
+    bot-check theo IP. Ứng viên xếp hạng theo độ khớp tên rồi thử tuần tự.
+
+    Ưu tiên format progressive (http_mp3) trước HLS: SoundCloud có cả
+    hls_aac_160k (m3u8) và http_mp3. m3u8 buộc phải đi _download_ffmpeg
+    (ffmpeg tải+encode một lần, chậm và dễ reconnect), còn progressive đi
+    _fetch_chunked + _transcode_local như YouTube — nhanh và resume được.
+    Selector có fallback về bestaudio/best nếu không có bản progressive.
+    """
+    if _looks_like_url(title):
+        cands = [{"title": title, "youtube_url": title}]
+    else:
+        cands = _rank_candidates("soundcloud", title, RESOLVE_CANDIDATES)
+    if not cands:
+        raise RuntimeError("soundcloud: search không có kết quả cho tên này")
+    last_err = None
+    for cand in cands:
+        try:
+            entry = _extract_one(
+                cand["youtube_url"], cand.get("title") or title, "soundcloud",
+                fmt=_SC_FORMAT)
+        except Exception as e:  # noqa: BLE001 - thử ứng viên tiếp theo
+            last_err = e
+            sys.stderr.write(
+                f"[music] soundcloud candidate '{cand.get('title')}' that bai: "
+                f"{str(e)[:120]}\n")
+            sys.stderr.flush()
+            continue
+        if not _probe_direct_url(entry):
+            last_err = RuntimeError("URL không tải được (probe)")
+            continue
+        if entry.get("client") in ("", "n/a"):
+            entry["client"] = "soundcloud"
         sys.stderr.write(
-            f"[music] resolve give-up '{title}': cookies="
-            f"{'on' if COOKIES_FILE else 'off'}, proxy="
-            f"{'on' if YTDLP_PROXY else 'off'}, "
-            f"pot={'on' if POT_AVAILABLE else 'off'}, "
-            f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}, "
-            f"tier_da_thu={tried or ['default']}, "
-            f"last={last_err}\n")
-        _hint = ""
-        if last_err is not None and any(
-                s in str(last_err)
-                for s in ("not a bot", "Sign in to confirm")):
-            # Bot-check sống sót qua TOÀN BỘ tier client.
-            if POT_AVAILABLE and not _srv:
-                # Plugin đã cài nhưng server POT không trả lời lúc yt-dlp cần
-                # token -> provider thất bại (đã thấy qua dòng [ytdlp:warn]).
-                _hint = (
-                    " -> POT server DOWN khi yt-dlp cần PO token "
-                    "(127.0.0.1:4416 không /ping — nghi deno OOM-kill trên "
-                    "512MB): xem log [start], restart service; lặp lại -> "
-                    "tăng RAM instance")
-            elif POT_AVAILABLE:
-                _hint = (
-                    " -> PO token có nhưng vẫn bot-check. Đọc các dòng "
-                    "[ytdlp:warn] phía trên để biết client nào fail: nếu CẢ "
-                    "nhóm không cần token (visionos/tv/web_embedded) cũng "
-                    "fail thì IP datacenter đã bị gắn cờ -> cần "
-                    "YTDLP_COOKIES_B64 mới hoặc proxy sticky/residential "
-                    "sạch; nếu chỉ nhóm cần token fail thì lỗi ở provider "
-                    "POT / JS runtime (deno)")
-            elif COOKIES_FILE:
-                _hint = (
-                    " -> cookie YouTube hết hạn/bị revoke: export lại "
-                    "cookies.txt rồi cập nhật env YTDLP_COOKIES_B64 "
-                    "trên Render (xem README)")
-            else:
-                _hint = (
-                    " -> chưa có PO token/cookies: cài bgutil plugin "
-                    "(requirements.txt) hoặc đặt env YTDLP_COOKIES_B64 "
-                    "(xem README)")
-        raise RuntimeError(
-            f"không lấy được format nào cho '{title}' "
-            f"(tier_da_thu={tried or ['default']}, "
-            f"deno={'yes' if shutil.which('deno') else 'NO'}, "
-            f"yt-dlp={yt_dlp.version.__version__}, "
-            f"cookies={'on' if COOKIES_FILE else 'off'}, "
-            f"proxy={'on' if YTDLP_PROXY else 'off'}, "
-            f"pot={'on' if POT_AVAILABLE else 'off'}, "
-            f"pot_srv={'up' if _srv else ('down' if POT_AVAILABLE else 'n/a')}): "
-            f"{last_err}{_hint}")
+            f"[music] soundcloud OK '{entry['title']}' "
+            f"(format_id={entry.get('format_id') or 'n/a'})\n")
+        sys.stderr.flush()
+        return entry
+    raise RuntimeError(
+        f"soundcloud: hết {len(cands)} ứng viên cho '{title}', last={last_err}")
+
+
+def _resolve(key: str, title: str) -> dict:
+    """Dispatcher đa nguồn: thử lần lượt các nguồn theo SOURCES. Nguồn vừa
+    gặp bot-check được tạm bỏ qua (cooldown) để request sau không mất thêm
+    10-20 s chờ một nguồn đang chết."""
+    with _lock:
+        cached = _resolved.get(key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached
+    errors = []
+    for idx, src in enumerate(SOURCES):
+        if _source_cooldown_active(src):
+            errors.append(f"{src}: đang cooldown (nguồn vừa bị chặn)")
+            continue
+        t0 = time.time()
+        try:
+            entry = (_resolve_soundcloud(title) if src == "soundcloud"
+                     else _resolve_youtube(title))
+        except Exception as e:  # noqa: BLE001 - thử nguồn tiếp theo
+            errors.append(str(e))
+            # Chỉ bot-check mới đáng đánh dấu cooldown; "không tìm thấy bài"
+            # là chuyện của bài đó, không phải nguồn chết.
+            if _is_client_level_err(e):
+                _mark_source_failed(src)
+            sys.stderr.write(
+                f"[music] nguon '{src}' that bai sau {time.time() - t0:.0f}s\n")
+            sys.stderr.flush()
+            continue
+        entry["source"] = src
+        with _lock:
+            _resolved[key] = entry
+        sys.stderr.write(
+            f"[music] resolve OK nguon='{src}' sau {time.time() - t0:.0f}s "
+            f"({idx + 1}/{len(SOURCES)} nguon)\n")
+        sys.stderr.flush()
+        return entry
+    raise RuntimeError(
+        f"không lấy được '{title}' từ bất kỳ nguồn nào (SOURCES="
+        f"{','.join(SOURCES)}): " + " || ".join(errors))
+
 # ---------------------------------------------------------------------------
 # Unified Server — MCP + HTTP Streaming (gộp chung MỘT Starlette app)
 # ---------------------------------------------------------------------------
@@ -1038,6 +1304,7 @@ def _preload_worker(key: str, title: str) -> None:
                 f"{time.time() - t0:.0f}s = resolve {t_resolve:.0f}s + tai "
                 f"{t_download:.0f}s ({src_bytes or _size_of(part)} B) + "
                 f"transcode {t_transcode:.0f}s, cycle {cycle + 1}, "
+                f"source={entry.get('source') or 'n/a'}, "
                 f"client={entry.get('client') or 'n/a'})\n")
             sys.stderr.flush()
             _prune_cache()
@@ -1273,6 +1540,13 @@ async def health(request: Request) -> JSONResponse:
         "pot": POT_AVAILABLE,
         "pot_server": _pot_server_up(timeout=1.0),
         "proxy": bool(YTDLP_PROXY),
+        "sources": {
+            "enabled": list(SOURCES),
+            "cooldown": {k: round(max(0, v - time.time()))
+                         for k, v in _source_fail_until.items()
+                         if v > time.time()},
+            "resolve_candidates": RESOLVE_CANDIDATES,
+        },
         "cache": {
             "dir": MEDIA_DIR,
             "files": _count_cache_files(),
@@ -1350,12 +1624,16 @@ def _run_http():
 @mcp.tool()
 def search_song(keyword: str) -> str:
     """Tìm bài hát theo tên (hoặc tên + ca sĩ). Trả về tối đa 5 kết quả:
-    title, uploader, duration_sec, youtube_url. Dùng get_song_url để lấy
-    stream URL mp3 cho robot phát."""
-    res = _search_youtube(keyword, 5)
+    title, uploader, duration_sec, source, youtube_url. Dùng get_song_url để
+    lấy stream URL mp3 cho robot phát. Tìm trên TẤT CẢ nguồn đang bật
+    (mặc định YouTube + SoundCloud) nên khi YouTube bị bot-check vẫn còn
+    kết quả từ nguồn khác."""
+    res = _search_all(keyword, 5)
     sys.stderr.write(f"[music] search '{keyword}' -> {len(res)} ket qua\n")
     for r in res[:3]:
-        sys.stderr.write(f"[music]   - {r.get('title')} | {r.get('uploader')}\n")
+        sys.stderr.write(
+            f"[music]   - {r.get('title')} | {r.get('uploader')} "
+            f"[{r.get('source')}]\n")
     sys.stderr.flush()
     return json.dumps({"results": res}, ensure_ascii=False)
 
@@ -1382,7 +1660,7 @@ def get_song_url(title: str) -> str:
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         q = " ".join(sys.argv[2:])
-        print(json.dumps(_search_youtube(q, 3), ensure_ascii=False, indent=2))
+        print(json.dumps(_search_all(q, 3), ensure_ascii=False, indent=2))
     else:
         sys.stderr.write(
             f"[music] transport={MCP_TRANSPORT} port={PORT} "

@@ -12,6 +12,8 @@ Kiem tra (khong goi YouTube):
      preload) va tra streaming body ngay.
   5. `_stream_body` voi `entry=None` (duong route thuc te): gui silence
      primer truoc, va dong response khi preload failed + resolve cung loi.
+  6. Da nguon: YouTube bot-check -> tu nhay sang SoundCloud, gan cooldown
+     cho nguon chet, va xep hang candidate theo do khop ten.
 """
 
 import os
@@ -85,6 +87,10 @@ class FakeYDL:
 real_ydl = yt_dlp.YoutubeDL
 real_probe0 = server._probe_direct_url
 server._probe_direct_url = lambda entry: True  # probe co test rieng o muc 3b
+# Các check dưới đây chỉ kiểm ladder YouTube -> khoá SOURCES lại 1 nguồn.
+# Phần multi-source được kiểm riêng ở mục 6.
+real_sources = server.SOURCES
+server.SOURCES = ("youtube",)
 yt_dlp.YoutubeDL = FakeYDL
 try:
     entry = server._resolve("verifykey1", "fake song")
@@ -119,6 +125,89 @@ finally:
     with server._lock:
         server._resolved.pop("verifykey1", None)
         server._resolved.pop("verifykey2", None)
+
+
+# ---------------------------------------------------------------------------
+# 6. Đa nguồn: YouTube bot-check -> tự nhảy sang SoundCloud + cooldown
+# ---------------------------------------------------------------------------
+check("_parse_sources bo qua nguon la",
+      server._parse_sources("youtube,zingmp3") == ("youtube",))
+check("_parse_sources giu thu tu",
+      server._parse_sources("soundcloud,youtube") == ("soundcloud", "youtube"))
+check("_parse_sources rong -> fallback youtube",
+      server._parse_sources("") == ("youtube",))
+check("mac dinh co soundcloud (nguon du phong)",
+      "soundcloud" in server._DEFAULT_SOURCES.split(","),
+      server._DEFAULT_SOURCES)
+check("_title_score: ten trung -> 1.0",
+      abs(server._title_score("Tam Thai Tu", "TÂM THÁI TỬ") - 1.0) < 1e-9,
+      str(server._title_score("Tam Thai Tu", "TÂM THÁI TỬ")))
+check("_title_score: 'Tam Thai Tu English' < 'Tam Thai Tu'",
+      server._title_score("TAM THÁI TỬ", "TAM THÁI TỬ Tiếng Anh")
+      > server._title_score("TAM THÁI TỬ", "TAM THÁI TỬ Tiếng Anh cover"),
+      str(server._title_score("TAM THÁI TỬ", "TAM THÁI TỬ Tiếng Anh")))
+check("_looks_like_url nhan dien URL",
+      server._looks_like_url("https://soundcloud.com/x/y")
+      and not server._looks_like_url("JACK - J97"))
+
+
+class MultiSourceYDL(FakeYDL):
+    """YouTube luôn bot-check; SoundCloud trả format HLS (không client)."""
+    order = []
+
+    def extract_info(self, target, download=False):
+        opts = self.opts
+        if opts.get("extract_flat"):
+            # search phang: phan biet nguon bang target "<key><n>:<query>"
+            # (scsearch... vs ytsearch...) chu khong phai default_search.
+            target = str(target or "")
+            if target.startswith("scsearch"):
+                return {"entries": [{
+                    "title": "Tam Thai Tu (JACK J97)",
+                    "url": "https://soundcloud.com/artist/tam-thai-tu",
+                    "duration": 245, "extractor_key": "Soundcloud"}]}
+            return {"entries": []}
+        if "soundcloud" in str(target):
+            MultiSourceYDL.order.append("soundcloud")
+            return {"title": "Tam Thai Tu", "url": "https://example.invalid/h.m3u8",
+                    "format_id": "hls", "ext": "m3u8"}
+        MultiSourceYDL.order.append("youtube")
+        raise yt_dlp.utils.DownloadError(BOT_CHECK)
+
+
+yt_dlp.YoutubeDL = MultiSourceYDL
+server._probe_direct_url = lambda entry: True
+server.SOURCES = ("youtube", "soundcloud")
+server._source_fail_until.clear()
+MultiSourceYDL.order = []
+try:
+    entry6 = server._resolve("verifykey6", "Tam Thu Tu JACK J97")
+    check("YouTube chan -> tu nhay sang SoundCloud",
+          entry6.get("source") == "soundcloud",
+          f"source={entry6.get('source')}")
+    check("co thu YouTube truoc khi doi nguon",
+          MultiSourceYDL.order[0] == "youtube"
+          and "soundcloud" in MultiSourceYDL.order[1:],
+          str(MultiSourceYDL.order[:3]))
+    check("nguon YouTube bi chan -> co cooldown",
+          server._source_cooldown_active("youtube"))
+    check("nguon thang -> khong bi cooldown",
+          not server._source_cooldown_active("soundcloud"))
+
+    # Request sau: nguon chết bị bỏ qua ngay (không mất thêm 10-20s).
+    before = len(MultiSourceYDL.order)
+    server._resolve("verifykey7", "Tam Thu Tu JACK J97")
+    check("request sau bo qua nguon dang cooldown",
+          MultiSourceYDL.order[before:] == ["soundcloud"],
+          str(MultiSourceYDL.order[before:]))
+finally:
+    yt_dlp.YoutubeDL = real_ydl
+    server._probe_direct_url = real_probe0
+    server.SOURCES = real_sources
+    server._source_fail_until.clear()
+    with server._lock:
+        server._resolved.pop("verifykey6", None)
+        server._resolved.pop("verifykey7", None)
 
 
 # ---------------------------------------------------------------------------
