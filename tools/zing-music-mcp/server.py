@@ -1162,12 +1162,42 @@ def _preload_state_update(key: str, **fields) -> None:
         _preload.setdefault(key, {}).update(fields)
 
 
+# Trạng thái preload giữa các mốc:
+#   "running" (resolve + tải source) -> "encoding" (ffmpeg đang ghi file
+#   .part, file LỚN DẦN) -> "ready" | "failed".
+# Mốc "encoding" tồn tại để /stream theo file đang lớn thay vì chờ xong mới
+# phát (xem _follow_encoding) — đây là thứ bỏ 26s im lặng trên Render.
+_PRELOAD_ENCODING = "encoding"
+
+
+def _publish_atomic(part: str, final: str) -> None:
+    """Đổi tên .part -> .mp3 (atomic cho người đọc). Có thử lại vài lần: trên
+    Windows os.replace fail (PermissionError) nếu đang có một đọc file .part
+    mở song song — chỉ xảy ra ở máy dev, Render (Linux) không bị."""
+    for attempt in range(5):
+        try:
+            os.replace(part, final)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def _count_cache_files() -> int:
     try:
         return len([n for n in os.listdir(MEDIA_DIR)
                     if n.endswith(".mp3") and not n.startswith("_")])
     except OSError:
         return 0
+
+
+def _preload_busy(key: str) -> bool:
+    """Bài đang được preload viết ra đĩa. Phải gộp CẢ "encoding" chứ không
+    chỉ "running": sau khi tải xong source, ffmpeg encode vào .part và
+    _stream_body đang phát chính file đó cho robot. Nếu _prune_cache chỉ nhìn
+    "running" thì nó sẽ xoá .part giữa lúc robot đang nghe -> bài bị cụt."""
+    return _preload_state(key) in ("running", _PRELOAD_ENCODING)
 
 
 def _prune_cache() -> None:
@@ -1177,7 +1207,8 @@ def _prune_cache() -> None:
     Quan trong: file tam `.part` / `.src` CUNG phai duoc don. Preload that bai
     giua chung (het deadline tai, ffmpeg loi) bo lai chung 5-12 MB ma khong
     bao gio doi toi file `.mp3` -> khong bao gio duoc don, dia Render day dan
-    sau vai chuc bai. Chi xoa file cua bai KHONG con preload dang chay."""
+    sau vai chuc bai. Chi xoa file cua bai KHONG con preload dang chay
+    (xem _preload_busy: phai tinh ca "encoding")."""
     try:
         names = [n for n in os.listdir(MEDIA_DIR)
                  if n.endswith(".mp3") and not n.startswith("_")]
@@ -1187,8 +1218,8 @@ def _prune_cache() -> None:
         return
 
     for n in temps:
-        if _preload_state(os.path.splitext(n)[0]) == "running":
-            continue  # dang tai: dung xoa, con dung cho lan ghi hien tai
+        if _preload_busy(os.path.splitext(n)[0]):
+            continue  # dang ghi: dung xoa, con dung cho lan ghi hien tai
         try:
             os.remove(os.path.join(MEDIA_DIR, n))
             sys.stderr.write(f"[music] prune temp: {n}\n")
@@ -1207,7 +1238,7 @@ def _prune_cache() -> None:
 
     names.sort(key=_mtime)
     for n in names[: len(names) - _CACHE_MAX_FILES]:
-        if _preload_state(n[:-4]) == "running":
+        if _preload_busy(n[:-4]):
             continue
         try:
             os.remove(os.path.join(MEDIA_DIR, n))
@@ -1385,6 +1416,10 @@ def _preload_worker(key: str, title: str) -> None:
             src_bytes = 0
             if ".m3u8" in url.lower():
                 # ffmpeg vua tai vua encode -> khong tach duoc 2 cong doan.
+                # .part da la MP3 hoan chinh ngay tu dau -> danh dau "encoding"
+                # de robot theo file dang lon thay vi cho tai xong.
+                _preload_state_update(key, state=_PRELOAD_ENCODING,
+                                      note="ffmpeg-m3u8")
                 _download_ffmpeg(url, headers, part)
                 t_download = time.time() - t_step
                 t_transcode = 0.0
@@ -1393,6 +1428,10 @@ def _preload_worker(key: str, title: str) -> None:
                 src_bytes = _size_of(src)
                 t_download = time.time() - t_step
                 t_step = time.time()
+                # .part bat dau la MP3 24 kHz mono dung chuan cua firmware va
+                # ffmpeg ghi progressive -> robot co the nghe ngay.
+                _preload_state_update(key, state=_PRELOAD_ENCODING,
+                                      note="transcode")
                 _transcode_local(src, part)
                 t_transcode = time.time() - t_step
                 try:
@@ -1402,7 +1441,7 @@ def _preload_worker(key: str, title: str) -> None:
             if _size_of(part) < _MEDIA_MIN_BYTES:
                 raise RuntimeError(
                     f"mp3 qua nho sau transcode: {_size_of(part)}")
-            os.replace(part, final)  # atomic -> reader khong thay file nua do
+            _publish_atomic(part, final)  # reader khong thay file nua do
             _preload_state_update(key, state="ready", err="")
             # Chia thoi gian theo cong doan: resolve (mang/POT) - tai
             # (googlevideo/proxy) - transcode (CPU instance). Day la so lieu de
@@ -1543,24 +1582,93 @@ def _ensure_silence() -> bytes:
     return data
 
 
+def _follow_encoding(key: str, file_off: int, t0: float, ctx: dict):
+    """Phát theo file .part đang được ffmpeg ghi (state="encoding"), thay vì
+    chờ encode xong rồi mới chuyển sang file.
+
+    Vì sao cần: Render free throttle CPU ~14 lần so với máy dev, nên transcode
+    một bài 3 phút mất 26s — chờ xong thì robot ngồi im 26s. Nhưng ffmpeg ghi
+    MP3 progressive: byte đầu tiên có mặt sau chưa tới 1s, và tốc độ ghi
+    (~160 KB/s) VƯỢT xa tốc độ ESP32 kéo (~20 KB/s) -> robot nghe được ngay
+    rồi nhận nốt phần còn lại, không bao giờ đói giữa bài.
+
+    Firmware KHÔNG cần sửa: khi file chưa xong, /stream vốn đã là
+    StreamingResponse không Content-Length, ESP32 đọc body tới khi đóng.
+
+    Ghi chú đọc file: mỗi vòng mở/đóng lại theo tên để không giữ handle khi
+    file bị đổi tên .part -> .mp3 (giữ handle sẽ chặn os.replace trên
+    Windows và gây stale-offset trên Linux)."""
+    final, part = _final_path(key), _part_path(key)
+    while True:
+        # Sau khi đổi tên, .part biến mất -> đọc nốt từ .mp3.
+        path = part if _size_of(part) > file_off else final
+        if _size_of(path) > file_off:
+            try:
+                with open(path, "rb") as f:
+                    f.seek(file_off)
+                    buf = f.read(64 * 1024)
+            except OSError:
+                buf = b""
+            if buf:
+                file_off += len(buf)
+                ctx["file_off"] = file_off
+                yield buf
+                continue
+        state = _preload_state(key)
+        if state == "ready":
+            # Đã đổi tên: đọc nốt phần cuối (thường đã hết ở nhánh trên).
+            if _size_of(final) > file_off:
+                continue
+            ctx["reason"] = "done"
+            return
+        if state == "failed":
+            ctx["reason"] = "failed"
+            return
+        if time.time() - t0 > _BODY_WAIT_MAX:
+            ctx["reason"] = "timeout"
+            return
+        time.sleep(0.2)  # file chưa lớn thêm -> đợi, không gửi byte rỗng
+
+
+def _live_fallback(key: str, title: str, entry: dict, reason: str):
+    """Fallback cuối: pipe ffmpeg trực tiếp từ direct URL (preload hỏng hoặc
+    quá _BODY_WAIT_MAX) — hành vi cũ. Trả None nếu resolve lỗi (hết đường ->
+    đóng response để firmware thử lại)."""
+    sys.stderr.write(f"[music] {reason} -> live pipe fallback key={key}\n")
+    sys.stderr.flush()
+    with _lock:
+        cached = _resolved.get(key)
+    if cached and cached.get("expires", 0) > time.time():
+        entry = cached  # URL preload đã resolve sẵn -> không tốn extract
+    else:
+        try:
+            entry = _resolve(key, title)  # URL mới nhất cho fallback
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[music] live pipe fallback resolve loi: {e}\n")
+            sys.stderr.flush()
+            return  # hết đường -> đóng response de firmware thu lai
+    return _ffmpeg_chunks(entry["direct_url"], entry.get("http_headers"))
+
+
 def _stream_body(key: str, title: str, entry: dict = None):
     """Body cho ket noi /stream chua co file (4 truong hop).
 
     `entry` chi can khi phai fallback live pipe; route /stream truyen None de
     khong resolve dong bo (tranh extract lan 2 chay song song voi preload).
-      1. File xong         -> doc toan bo file, dung (primer neu da gui ~0.4s).
-      2. Dang tai           -> primer silence 8 KB, pace ~realtime -> cho file
-                               xong roi chuyen sang file tu byte 0 (MP3 lien tuc).
-      3. Preload loi        -> live pipe giam cap (hanh vi cu truoc day).
-      4. Qua _BODY_WAIT_MAX -> live pipe giam cap.
+      1. File xong    -> Doc toan bo file, dung (primer neu da gui ~0.4s).
+      2. Dang ENCODE  -> Theo file .part dang lon, phat ngay khi co byte dau
+                         tien (xem _follow_encoding). Day la nhanh nhat.
+      3. Dang tai src -> primer silence pace ~realtime, cho den khi (2)/(1).
+      4. Preload loi / qua _BODY_WAIT_MAX -> live pipe giam cap.
     """
-    final = _final_path(key)
+    final, part = _final_path(key), _part_path(key)
     t0 = time.time()
     primed = False
     silence = b""
     off = 0
     silence_err = False
     while True:
+        state = _preload_state(key)
         if _size_of(final) > 0:
             if primed:
                 sys.stderr.write(
@@ -1578,28 +1686,25 @@ def _stream_body(key: str, title: str, entry: dict = None):
                 sys.stderr.write(f"[music] doc file loi: {e}\n")
                 sys.stderr.flush()
                 return
-        state = _preload_state(key)
-        elapsed = time.time() - t0
-        if state == "failed" or elapsed > _BODY_WAIT_MAX:
+        if state == _PRELOAD_ENCODING and _size_of(part) > 0:
+            # ffmpeg dang ghi .part -> phat theo ngay, khong cho encode xong.
+            if primed:
+                sys.stderr.write(
+                    f"[music] primer->encode switch key={key} sau "
+                    f"{time.time() - t0:.1f}s (theo file dang encode)\n")
+                sys.stderr.flush()
+            ctx = {"file_off": 0, "reason": ""}
+            yield from _follow_encoding(key, 0, t0, ctx)
+            if ctx["reason"] == "done":
+                return
+            reason = ("preload failed" if ctx["reason"] == "failed"
+                      else f"cho file qua {_BODY_WAIT_MAX}s")
+            yield from _live_fallback(key, title, entry, reason) or ()
+            return
+        if state == "failed" or time.time() - t0 > _BODY_WAIT_MAX:
             reason = ("preload failed" if state == "failed"
                       else f"cho file qua {_BODY_WAIT_MAX}s")
-            sys.stderr.write(
-                f"[music] {reason} -> live pipe fallback key={key}\n")
-            sys.stderr.flush()
-            with _lock:
-                cached = _resolved.get(key)
-            if cached and cached.get("expires", 0) > time.time():
-                entry = cached  # URL preload da resolve san -> khong ton extract
-            else:
-                try:
-                    entry = _resolve(key, title)  # URL moi nhat cho fallback
-                except Exception as e:  # noqa: BLE001
-                    sys.stderr.write(
-                        f"[music] live pipe fallback resolve loi: {e}\n")
-                    sys.stderr.flush()
-                    return  # het duong -> dong response de firmware thu lai
-            yield from _ffmpeg_chunks(entry["direct_url"],
-                                      entry.get("http_headers"))
+            yield from _live_fallback(key, title, entry, reason) or ()
             return
         if not silence and not silence_err:
             try:
