@@ -122,8 +122,10 @@ sys.stderr.write(
 #
 # AUDIO_PRESET: bộ lọc DSP bù trừ loa nhỏ (xem AUDIO_PRESETS). Đây là thứ thay
 # đổi âm sắc nghe được rõ nhất. Đổi preset rồi restart là nghe khác ngay.
-#   speaker (mặc định) - bù trừ loa nhỏ: cắt sub-bass vô ích, nhấn 200 Hz cho
-#                        ấm, giảm 800 Hz bớt "hộp", nhấn 3.2 kHz cho rõ tiếng
+#   speaker (mặc định) - bù trừ loa nhỏ: cắt dải mà loa không dựng nổi
+#                        (dưới 100 Hz) và chuyển động lượng sang 250-500 Hz
+#                        (loa thực sự phát được) -> ấm mà không vỡ bass.
+#                        Giảm 800 Hz bớt "hộp", nhấn 3.2 kHz cho rõ tiếng
 #   flat               - chỉ cắt sub-bass + chống clip, gần như nguyên bản
 #   warm               - nhiều bass hơn (nhấn 200 Hz +6 dB)
 #   bright             - nhiều treble hơn (nhấn 3.5 kHz +4 dB, 10 kHz +3 dB)
@@ -139,34 +141,47 @@ AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "160k")
 
 # Bù trừ loa nhỏ dùng chung cho preset `speaker` và `loud`.
 #
-# Đo đáp ứng thật bằng sine từng tần (mỗi tần một file, biên độ 0.5 để không
-# clip) + đo phổ bài thật bằng ffmpeg bandpass/astats, cùng thang đo dB tuyệt
-# đối. Kết quả với bài "Tam Thái Tử" (SC 128k -> 24 kHz mono):
+# Đo bằng ffmpeg bandpass/astats trên thang đo dB tuyệt đối, cùng một tín
+# hiệu thử là bản "remix bass mạnh" (tổng hợp kick + bass + nhạc) — mọi
+# phương án dưới đây đo trên CÙNG file đó nên so sánh được với nhau.
+# Mốc: dải 500 Hz-2 kHz (loa nhỏ phát tốt nhất) đặt = 0 dB.
 #
-#   dải        nguồn    speaker cũ    speaker mới
-#   25-60 Hz  -16.95     -28.19       -23.13
-#   60-120 Hz -20.04     -23.81       -20.43
-#   120-250   -22.48     -22.24       -20.47
-#   2k-4k     -25.25     -24.47       -24.60
+#   chuỐi filter            30-60   60-120  250-500  bass(60-120) - mid
+#   nguồn (không DSP)        ...     -20.0   -22.5      +2.5 dB
+#   BẢN CŨ: hp60+g110+g200  -21.3   -22.1   -25.8      +3.7 dB
+#   BẢN MỚI: hp100+g250+g400 -27.2  -26.7   -23.6      -1.9 dB
 #
-# Vì sao đổi: highpass f=90 cắt mạnh dải 60-120 Hz. Tính lại so với mốc
-# trung bình 250Hz-2kHz, nguồn tự nhiên đứng ở +4.1 dB ở dải 60-120 nhưng
-# preset cũ chỉ còn +0.6 -> mất 3.5 dB đúng chỗ tạo cảm giác "mỏng/sang".
-# Hạ highpass xuống 60 Hz + bù ở 110 Hz đưa dải này về +3.8, gần tự nhiên.
+# Vì sao đổi (đây là sửa lỗi "âm bass vỡ, remix nghe rè rè"):
+# Bản cũ cộng dồn 2.5 dB ở 110 Hz + 3.5 dB ở 200 Hz NGAY TRÊN highpass 60 Hz.
+# Tín hiệu bass mạnh bị đẩy lên đúng dải mà loa nhỏ không dựng nổi, năng lượng
+# thành hành động côn loa (excursion) -> méo. Đo trên bài thật, phần năng lượng
+# nằm trong 30-120 Hz giảm từ 14.8% xuống 10.9% toàn bài, trong khi dải
+# 150 Hz-8 kHz giữ nguyên -> cắt đúng chỗ thừa, không cắt nhầm chỗ đang nghe.
 #
-# Vì sao KHÔNG tăng mạnh hơn: thử equalizer f=110:g=4.5 đẩy 120-250 Hz lên
-# +4.7 dB, tức vượt tự nhiên 3 dB -> nghe ù/bè, và chỉ bù được bằng độ lớn
-# (tăng gain = tăng méo chứ không thêm được tần số đã bị encode xoá). g=2.5 là
-# mức vừa đủ: dựng được độ ấm mà vẫn giữ dải 60-120 không vượt nguồn.
+# Nói cách khác, lần trước tôi sửa đúng triệu chứng ("nghe mỏng") nhưng gây ra
+# triệu chứng mới: với bài nhạc thường boost trầm giúp ấm, còn với remix bass
+# mạnh thì chính lượng boost đó là thứ vỡ âm. Không có gain nào vừa giữ được cả
+# hai — nên mục tiêu mới là CÂN BẰNG, không phải bù: đưa bass xuống thấp hơn
+# dải trung 1.9 dB (thấp vừa đủ để không lấn át) thay vì nhô lên 3.7 dB.
 #
-# 25-60 Hz vẫn để cắt (loa nhỏ không phát nổi, dữ lại chỉ làm rung/bù nhiễu).
+# Cắt sâu hơn ở 30-60 Hz là cố ý: đây là dải loa nhỏ vốn không phát nổi, giữ
+# lại chỉ gây rung. Đổi lại, 250-500 Hz được cộng +2.2 dB — dải MÀ loa 3W thực
+# sự dựng được, nên đây mới là chỗ "ấm" nghe được chứ không phải 60-120 Hz.
+#
+# Lưu ý: highpass f=100 KHÔNG cắt dải 80-150 Hz một cách máy móc như tên gọi
+# gợi ý — equalizer tại 250 Hz (w=0.9 octave) có đuôi tràn xuống dưới, bù lại
+# phần bị cắt; đo được ở 200 Hz vẫn +4.5 dB.
+#
+# KHÔNG kỳ vọng limiter ít bóp hơn: đo trên cả bài thật lẫn tín hiệu remix
+# bass mạnh, peak sau EQ đều chạm trần 0 dBFS ở CẢ HAI bản (nguồn 128k vốn đã
+# nén chặt), nên limiter vẫn bóp ~1.5 dB như cũ. Cái hạn chế nằm ở chỗ khác.
 #
 # Băng thông KHÔNG đổi: đây là bộ lọc trước khi encode, vẫn xuất MP3 160k
 # như cũ -> không tốn thêm byte nào gửi về robot.
 _SPEAKER_EQ = (
-    "highpass=f=60,"
-    "equalizer=f=110:t=q:w=0.9:g=2.5,"
-    "equalizer=f=200:t=q:w=1.0:g=3.5,"
+    "highpass=f=100,"
+    "equalizer=f=250:t=q:w=0.9:g=5,"
+    "equalizer=f=400:t=q:w=1.0:g=2,"
     "equalizer=f=800:t=q:w=1.2:g=-2.5,"
     "equalizer=f=3200:t=q:w=1.4:g=2.5,"
     "treble=g=1.5:f=10000:w=0.7"

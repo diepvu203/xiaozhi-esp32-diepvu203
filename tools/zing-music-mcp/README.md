@@ -130,14 +130,22 @@ thời gian nằm ở mạng (resolve/tải) và CPU của instance, **không ph
 
 **Preset (`AUDIO_PRESET`)** — đổi preset rồi restart là nghe khác ngay, nên cứ thử A/B:
 
-| Preset | Đặc điểm | Đáp tuyến đo được (48 kHz → 24 kHz mono) |
+| Preset | Đặc điểm | Đáp tuyến đo được (24 kHz mono, chỉ EQ chứ không limiter/codec) |
 |---|---|---|
-| `speaker` (mặc định) | Bù trừ loa nhỏ: cắt sub-bass, ấm hơn, bớt "hộp", rõ tiếng | 50 Hz −12 · 90 Hz −2.5 · 200 Hz **+3.5** · 800 Hz −2.5 · 3.2 kHz **+2.5** · 10 kHz +1.5 |
+| `speaker` (mặc định) | Bù trừ loa nhỏ: cắt mạnh dải loa không dựng nổi, dồn sang 250–500 Hz (loa thực sự phát được) → ấm mà **không vỡ bass**; giảm 800 Hz bớt "hộp", nhấn 3.2 kHz cho rõ tiếng | 50 Hz **−12.0** · 80 Hz **−4.6** · 100 Hz −1.8 · 200 Hz **+4.5** · 250 Hz **+5.7** · 400 Hz **+4.2** · 800 Hz −1.2 · 3.2 kHz **+2.4** · 10 kHz +0.8 |
 | `flat` | Gần như nguyên bản, chỉ cắt sub-bass + chống clip | 90 Hz −3 · còn lại ~0 |
 | `warm` | Bass nhiều hơn (nhấn 200 Hz +6 dB) | 200 Hz **+5.8** |
 | `bright` | Treble nhiều hơn (3.5 kHz +4, 10 kHz +3) | 3.5 kHz **+3.5** · 10 kHz **+1.7** |
 | `loud` | To/nhỏ đều giữa các bài (`loudnorm`) + EQ `speaker` | như `speaker`, mức to được chuẩn hoá |
 | `none` | Không DSP. Thô nhất và **dễ rè nhất** (bass sâu làm màng loa rung) | 0 dB toàn dải |
+
+> **Vì sao `speaker` cắt 30–100 Hz mạnh thế.** Loa 3W không dựng nổi dải đó;
+> giữ lại chỉ biến thành hành động côn loa (excursion) → méo, nghe "vỡ/rè", và
+> bất kỳ mức boost nào ở 60–200 Hz cũng *tăng* hiệu ứng đó. Đo trên bài thật,
+> phần năng lượng trong 30–120 Hz giảm từ **14.8% → 10.9%** toàn bài, còn dải
+> 150 Hz–8 kHz giữ nguyên. Bản cũ (nhấn +2.5 dB @110 Hz, +3.5 dB @200 Hz) vì
+> thế nghe ấm với bài nhạc thường nhưng vỡ với remix bass mạnh. Nếu nghe bài nào
+> bị "mỏng", hãy A/B `AUDIO_PRESET=warm`
 
 Preset nào cũng kết thúc bằng `alimiter=limit=0.841` (−1.5 dBFS) để PCM sau khi giải mã không bị clip khi nhân software volume trong firmware.
 

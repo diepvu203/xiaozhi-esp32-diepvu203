@@ -107,6 +107,34 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
+            // Nhấn nút khi đang phát nhạc = MUỐN DỪNG để ra lệnh khác.
+            // MusicPlayer chạy task riêng, không nằm trong state machine, nên
+            // ToggleChatState() một mình KHÔNG dừng được nhạc: robot cứ phát
+            // đến hết bài, chỉ còn cách reset nguồn.
+            if (MusicPlayer::GetInstance().IsPlaying()) {
+                ESP_LOGI(TAG, "Wake button: stop music");
+                MusicPlayer::GetInstance().Stop();
+                // Sau khi dừng, state thường đã là kDeviceStateListening
+                // (log thật: speaking -> listening ngay khi TTS hết câu).
+                // ToggleChatState ở state đó lại CloseAudioChannel() -> robot
+                // im luôn, người dùng phải bấm lần 2 mới nói được. Vì vậy gọi
+                // StartListening(): đã listening thì không đổi gì, đang idle
+                // thì mở mic nghe luôn. AbortSpeaking chỉ khi còn đang speaking
+                // để chặn câu TTS đang chờ phát chồng lên.
+                // KHÔNG capture `app` (biến local của callback nút): lambda
+                // chạy trên main task sau khi stack frame này đã thoát ->
+                // tham chiếu treo. Gọi lại GetInstance() bên trong.
+                app.Schedule([]() {
+                    auto& a = Application::GetInstance();
+                    if (a.GetDeviceState() == kDeviceStateSpeaking) {
+                        a.AbortSpeaking(kAbortReasonNone);
+                    }
+                    if (a.GetDeviceState() != kDeviceStateListening) {
+                        a.StartListening();
+                    }
+                });
+                return;
+            }
             app.ToggleChatState();
         });
         touch_button_.OnPressDown([this]() { Application::GetInstance().StartListening(); });
