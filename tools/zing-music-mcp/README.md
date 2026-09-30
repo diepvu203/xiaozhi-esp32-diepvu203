@@ -15,6 +15,9 @@ trước đây). Robot chỉ nhận 1 URL stream duy nhất và tự stream qua 
 |------|-------|--------|
 | `search_song` | `keyword` (tên bài / ca sĩ) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url` (xếp theo độ khớp tên, ưu tiên SoundCloud) |
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
+| `search_radio` | `keyword` (tên / quốc gia / chủ đề) | Tối đa 8 trạm: `name`, `country`, `tags`, `bitrate`, `codec`, `hls`, `url` (mọi nguồn MP3/AAC/HLS đều nhận — server transcode) |
+| `get_radio_url` | `name` (tên trạm) | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/radio/<id>.mp3"}` — radio là stream liên tục, mở URL là nghe mãi tới khi stop |
+| `/radio/<id>.mp3` | route FastAPI | Stream MP3 sống (`StreamingResponse` vô hạn): primer MP3 im ≤2.5s → audio radio transcode về 24 kHz mono (qua DSP `AUDIO_FILTERS`); **luôn 200, bỏ qua `Range`** (radio không có byte offset để resume) |
 
 Cơ chế: `get_song_url` bắt đầu **preload nền** ngay (resolve googlevideo +
 tải chunk 1 MB có resume + transcode MP3 CBR 160k — xem `AUDIO_BITRATE` —

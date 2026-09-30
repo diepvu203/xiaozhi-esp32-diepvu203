@@ -18,6 +18,7 @@ Kiem tra (khong goi YouTube):
 
 import os
 import sys
+import time
 
 import yt_dlp
 
@@ -654,3 +655,75 @@ if FAILED:
     print(f"THAT BAI {len(FAILED)}: {', '.join(FAILED)}")
     sys.exit(1)
 print("Tat ca check PASS")
+
+
+# ---------------------------------------------------------------------------
+# Radio: route + body (offline — mock _ffmpeg_chunks, khong can mang)
+# DUNG CLIENT RIENG _cr: _c o phia tren da close() trong finally.
+# ---------------------------------------------------------------------------
+from starlette.testclient import TestClient as _RadioTC  # noqa: E402
+_cr = _RadioTC(server.stream_app)
+
+_RADIO_KEY = "rtest0001"
+_RADIO_URL = "http://tram-ao/radio"
+with server._lock:
+    server._radio_stations[_RADIO_KEY] = {"name": "Tram Ao",
+                                          "url": _RADIO_URL}
+
+
+def _fake_ffmpeg_chunks(url, headers=None, live=False):
+    assert live is True, "radio phai dung live=True (khong at_eof)"
+    yield b"M" * 4096
+
+
+server._ffmpeg_chunks = _fake_ffmpeg_chunks
+try:
+    _rr = _cr.get(f"/radio/{_RADIO_KEY}.mp3")
+    _rb = _rr.content[:5000]
+    check("radio: route ton tai, tra 200",
+          _rr.status_code == 200, f"status={_rr.status_code}")
+    check("radio: body co byte tu ffmpeg mock",
+          b"M" in _rb, f"len={len(_rb)}")
+
+    _rr2 = _cr.get(f"/radio/{_RADIO_KEY}.mp3",
+                  headers={"Range": "bytes=1000-"})
+    check("radio: Range bi BO QUA (tra 200, khong 206)",
+          _rr2.status_code == 200, f"status={_rr2.status_code}")
+
+    _rr3 = _cr.get("/radio/keykhongton.mp3")
+    check("radio: key la -> 404", _rr3.status_code == 404,
+          f"status={_rr3.status_code}")
+finally:
+    with server._lock:
+        server._radio_stations.pop(_RADIO_KEY, None)
+
+
+# ---------------------------------------------------------------------------
+# Radio: ffmpeg chet truoc khi ra byte -> body dung ngay, khong treo
+# ---------------------------------------------------------------------------
+def _dead_ffmpeg_chunks(url, headers=None, live=False):
+    if False:
+        yield b""
+    return
+
+
+server._ffmpeg_chunks = _dead_ffmpeg_chunks
+with server._lock:
+    server._radio_stations[_RADIO_KEY] = {"name": "Tram Chet",
+                                          "url": _RADIO_URL}
+try:
+    _t0 = time.time()
+    _rr4 = _cr.get(f"/radio/{_RADIO_KEY}.mp3")
+    _el = time.time() - _t0
+    check("radio: tram chet -> response dung trong 20s (khong treo)",
+          _el < 20, f"{_el:.1f}s")
+finally:
+    with server._lock:
+        server._radio_stations.pop(_RADIO_KEY, None)
+
+
+print()
+if FAILED:
+    print(f"THAT BAI {len(FAILED)}: {', '.join(FAILED)}")
+    sys.exit(1)
+print("Tat ca check PASS (ke ca radio)")

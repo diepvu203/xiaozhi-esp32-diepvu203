@@ -56,6 +56,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import socket
@@ -713,6 +714,118 @@ def _lan_ip() -> str:
 def _stream_url(key: str) -> str:
     base = PUBLIC_BASE or f"http://{_lan_ip()}:{PORT}"
     return f"{base}/stream/{key}.mp3"
+
+
+def _radio_url(key: str) -> str:
+    base = PUBLIC_BASE or f"http://{_lan_ip()}:{PORT}"
+    return f"{base}/radio/{key}.mp3"
+
+
+# ---------------------------------------------------------------------------
+# Radio (radio-browser.info) — KHAC bai hat: khong pre-load, khong file dong.
+# Radio la stream VO HAN, nen server chi transcode khi robot mo ket noi, va
+# luon tra 200 (khong Range/206): radio khong co "byte offset" de resume —
+# khi firmware ket noi lai giua chung, no muon am thanh HIENTAI.
+# ---------------------------------------------------------------------------
+# Mirror theo docs.radio-browser.info (chot vien nao do cung duoc).
+_RADIO_MIRRORS = tuple(m for m in str(os.environ.get(
+    "RADIO_MIRRORS",
+    "https://all.api.radio-browser.info,"
+    "https://de1.api.radio-browser.info,"
+    "https://at1.api.radio-browser.info,"
+    "https://nl1.api.radio-browser.info")).split(",") if m)
+_radio_mirror = {"base": ""}       # vien dang song (khong do lai moi request)
+_radio_search_cache = {}           # query -> {t, list} (TTL 1h)
+_radio_stations = {}               # key -> {name, url, ...} (phuc vu /radio)
+_RADIO_UA = "xiaozhi-music-mcp/1.0"
+
+
+def _radio_api(path: str, timeout: float = 12.0):
+    """GET JSON tu radio-browser, chot vien. Bat buoc User-Agent (API tu choi
+    UA mac dinh cua urllib) va khong trailing slash (tra 301 neu thieu)."""
+    order = [_radio_mirror["base"]] if _radio_mirror["base"] else []
+    order += [m for m in _RADIO_MIRRORS if m not in order]
+    last_err = None
+    for base in order:
+        try:
+            req = urllib.request.Request(base + path,
+                                          headers={"User-Agent": _RADIO_UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            if not _radio_mirror["base"]:
+                _radio_mirror["base"] = base
+                sys.stderr.write(f"[radio] mirror OK: {base}\n")
+                sys.stderr.flush()
+            return data
+        except Exception as exc:  # mirror chet -> thu vien ke tiep
+            last_err = exc
+    raise RuntimeError(f"radio-browser API loi: {last_err}")
+
+
+def _radio_search(query: str, limit: int = 40) -> list:
+    """Tim dia theo ten.
+
+    KHONG loc theo codec/HLS: nguon chi can DOC DUOC BOI FFMPEG la du, vi
+    firmware chi nhan MP3 24 kHz mono tu /radio (server transcode). Loc HLS
+    o day la loi thiet ke — nhieu dia Viet Nam (VD VOV) chi co playlist.m3u8.
+    Sap xep theo DO KHOP TEN truoc, clickcount sau: API byname khop chuoi con
+    nen "VOV" keo ve ca tram Nga (Novovoronezh)."""
+    q = query.strip().lower()
+    with _lock:
+        hit = _radio_search_cache.get(q)
+    if hit and time.time() - hit["t"] < 3600:
+        return hit["list"]
+    path = ("/json/stations/byname/" + urllib.parse.quote(query.strip()) +
+            f"?limit={limit}&order=clickcount&reverse=true&hidebroken=true")
+    raw = _radio_api(path)
+    out = []
+    for st in (raw if isinstance(raw, list) else []):
+        url = (st.get("url_resolved") or st.get("url") or "").strip()
+        if not url:
+            continue
+        codec = str(st.get("codec") or "UNKNOWN").upper()
+        hls = bool(st.get("hls")) or \
+            url.lower().split("?")[0].endswith(".m3u8")
+        out.append({
+            "name": (st.get("name") or "").strip(),
+            "country": (st.get("country") or "").strip(),
+            "tags": (st.get("tags") or "").strip(),
+            "bitrate": int(st.get("bitrate") or 0),
+            "codec": codec,
+            "hls": hls,
+            "clicks": int(st.get("clickcount") or 0),
+            "url": url,
+        })
+    # (do khop ten, so luot nghe) nghich dao -> ten khop dung len truoc
+    out.sort(key=lambda s: (_title_score(q, s["name"]), s["clicks"]),
+             reverse=True)
+    for s in out:
+        s.pop("clicks", None)  # khong can gui cho LLM
+    with _lock:
+        _radio_search_cache[q] = {"t": time.time(), "list": out}
+    return out
+
+
+def _radio_pick(name: str) -> dict:
+    """Chon dia khop ten nhat: tim trong cac ket qua da search truoc (de LLM
+    chon tu danh sach), khong thay thi tim moi bang ten do."""
+    want = _norm_title(name)
+    best, best_score = None, 0.0
+    with _lock:
+        cached = list(_radio_search_cache.values())
+    for hit in cached:
+        for st in hit["list"]:
+            s = _title_score(want, st["name"])
+            if s > best_score:
+                best, best_score = st, s
+    if best is None or best_score < 0.34:
+        for st in _radio_search(name, 24):
+            s = _title_score(want, st["name"])
+            if s > best_score:
+                best, best_score = st, s
+    if best is None:
+        raise RuntimeError(f"khong tim thay dia '{name}' (chi lay dia MP3)")
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -1597,15 +1710,21 @@ def _preload_start(key: str, title: str) -> None:
                      daemon=True).start()
 
 
-def _ffmpeg_chunks(direct_url: str, headers: dict = None):
+def _ffmpeg_chunks(direct_url: str, headers: dict = None,
+                    live: bool = False):
     # 1 lần convert duy nhất: nguồn -> PCM (swr + filter DSP) -> MP3 160 kbps.
     cmd = [
         FFMPEG, "-hide_banner", "-loglevel", "warning",
         "-reconnect", "1",
-        "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
     ]
+    # -reconnect_at_eof CHI dung cho VOD (file googlevideo dut giua chung):
+    # voi stream LIVE (radio HLS...) moi segment ket thuc bang EOF binh
+    # thuong -> co at_eof lam ffmpeg treo vong lap reconnect ma khong ra byte
+    # nao (do duoc tren live VOV: 0 B voi at_eof, 262 KB khong co).
+    if not live:
+        cmd += ["-reconnect_at_eof", "1"]
     # Trùng khớp với cách yt-dlp tự tải: cùng proxy (cùng IP đã extract —
     # googlevideo có thể gắn IP) + cùng http_headers (UA android/ios/tv —
     # Google có thể 403 nếu ffmpeg gửi UA mặc định Lavf/xx).
@@ -1975,6 +2094,119 @@ def stream(key: str, request: Request):
         headers={"Content-Type": "audio/mpeg", "Accept-Ranges": "bytes"})
 
 
+# ---------------------------------------------------------------------------
+# /radio: stream song dong, khong gioi han do dai (khac /stream la file co dinh)
+# ---------------------------------------------------------------------------
+def _radio_body(key: str, url: str):
+    """Primer ngan + stream MP3 transcode tu truc bo (vo han).
+
+    Primer che ~2.5s lan ffmpeg ket noi truc do (do duoc ~4s); neu ffmpeg ra
+    byte TRUOC do thi dung ngay — khong de robot nghe khoang im thua. Thread
+    pump dua vao queue de nguoi doc kiem soat toc do (backpressure) — tai
+    khong bao gio cham hon nguoi nghe.
+
+    Chong treo + chong tien trinh mo:
+    - drain co watchdog 20s: ffmpeg khong ra byte nao (tram chet, network
+      sung...) -> dong response, firmware thay mat ket noi nen retry 3 lan
+      roi dung sach se, thay vi treo vo thuong trong vong pre-buffer.
+    - client ngat (q.put bi chan khi queue day) -> stop_evt ra hieu, pump
+      thoat, gen.close() goi finally cua _ffmpeg_chunks de kill ffmpeg. Neu
+      khong, moi request ngat de lai 1 ffmpeg mo (moi radio hoat dong lien
+      tuc thi tich dan phai restart Render)."""
+    q = queue.Queue(maxsize=512)
+    done = object()
+    stop_evt = threading.Event()
+
+    def pump():
+        gen = _ffmpeg_chunks(url, live=True)
+        try:
+            for chunk in gen:
+                if stop_evt.is_set():
+                    break
+                try:
+                    q.put(chunk, timeout=0.5)
+                except queue.Full:
+                    if stop_evt.is_set():
+                        break
+        except Exception as exc:
+            sys.stderr.write(f"[radio] ffmpeg loi: {exc}\n")
+            sys.stderr.flush()
+        finally:
+            try:
+                gen.close()
+            except Exception:
+                pass
+            q.put(done)
+
+    worker = threading.Thread(target=pump, daemon=True)
+    worker.start()
+    try:
+        primer = _ensure_silence()
+        pace = _primer_pace()
+        deadline = time.time() + 2.5
+        pos = 0
+        step = 16 * 1024
+        saw_done = False
+        while pos < len(primer) and time.time() < deadline:
+            try:
+                first = q.get(timeout=0.2)
+            except queue.Empty:
+                piece = primer[pos:pos + step]
+                pos += len(piece)
+                yield piece
+                time.sleep(len(piece) / pace)
+                continue
+            if first is done:
+                saw_done = True   # ffmpeg chet truoc khi ra byte -> dung lai
+            else:
+                yield first
+            break
+        if not saw_done:
+            live_deadline = time.time() + 20
+            while True:
+                try:
+                    item = q.get(timeout=1.0)
+                except queue.Empty:
+                    if time.time() > live_deadline:
+                        sys.stderr.write(
+                            f"[radio] khong nhan duoc audio 20s -> dong "
+                            f"ket noi (tram dang xuong hoac song tre: "
+                            f"{url[:80]})\n")
+                        sys.stderr.flush()
+                        return
+                    continue
+                if item is done:
+                    return
+                live_deadline = time.time() + 20  # co du lieu -> gia han
+                yield item
+    finally:
+        # Nguoi doc di (client ngat/timeout): danh thuc pump dang ket o put,
+        # de no thoat vong lap -> dong ffmpeg. Khong co dong nay, moi
+        # connection dai se de lai 1 ffmpeg chay mai tren host.
+        stop_evt.set()
+        try:
+            worker.join(timeout=3.0)
+        except Exception:
+            pass
+
+
+@stream_app.get("/radio/{key}.mp3")
+def radio(key: str):
+    with _lock:
+        st = _radio_stations.get(key)
+    if not st:
+        raise HTTPException(404, "unknown radio id - hay goi get_radio_url truoc")
+    sys.stderr.write(f"[radio] stream start key={key} '{st['name']}'\n")
+    sys.stderr.flush()
+    # LUON 200: firmware gui Range khi ket noi lai (attempt 2/3) — radio khong
+    # co offset de resume, tra 206/416 la sai. Firmware chap nhan 200 (xem
+    # music_player.cc) va reset decoder de ngam tiep am thanh HIENTAI.
+    return StreamingResponse(
+        _radio_body(key, st["url"]),
+        media_type="audio/mpeg",
+        headers={"Content-Type": "audio/mpeg", "Cache-Control": "no-store"})
+
+
 # /health ở ROOT cho Render healthCheckPath — đăng ký qua custom_route nên
 # không cần auth; FastAPI không có route này (Mount đặt SAU nên custom_route
 # được match trước). KHÔNG được comment decorator này: render.yaml đặt
@@ -1988,6 +2220,11 @@ async def health(request: Request) -> JSONResponse:
         "pot": POT_AVAILABLE,
         "pot_server": _pot_server_up(timeout=1.0),
         "proxy": bool(YTDLP_PROXY),
+        "radio": {
+            "mirror": _radio_mirror["base"] or None,
+            "stations": len(_radio_stations),
+            "queries": len(_radio_search_cache),
+        },
         "sources": {
             "enabled": list(SOURCES),
             "cooldown": {k: round(max(0, v - time.time()))
@@ -2143,6 +2380,43 @@ def get_song_url(title: str) -> str:
         "status": "ready",
         "id": key,
         "stream_url": _stream_url(key),
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def search_radio(keyword: str) -> str:
+    """Tìm đài phát thanh (radio) theo tên/quốc gia/chủ đề. Trả về tối đa 8
+    trạm: name, country, tags, bitrate, codec, hls, url (nguồn MP3/AAC/HLS
+    đều được — server transcode về MP3 cho robot). Dùng get_radio_url để lấy
+    stream_url cho robot. Ví dụ: 'VOV', 'Nhạc trữ tình', 'Vietnam'."""
+    res = _radio_search(keyword)
+    sys.stderr.write(f"[radio] search '{keyword}' -> {len(res)} tram MP3\n")
+    for s in res[:3]:
+        sys.stderr.write(
+            f"[radio]   - {s['name']} | {s['country']} | {s['bitrate']}kbps\n")
+    sys.stderr.flush()
+    return json.dumps({"results": res[:8]}, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_radio_url(name: str) -> str:
+    """Chuẩn bị một đài phát thanh để robot phát. Trả về NGAY {"status":
+    "ready", "stream_url": "..."} — robot gọi self.music.play(stream_url).
+    Radio là stream liên tục không có đầu/cuối nên KHÔNG cần chờ tải: robot
+    mở URL là nghe trực tiếp và nghe mãi cho tới khi self.music.stop. Nên
+    gọi search_radio trước để lấy name chính xác của trạm."""
+    st = _radio_pick(name)
+    key = _key_of("radio:" + st["name"] + "|" + st["url"])
+    with _lock:
+        _radio_stations[key] = st
+    sys.stderr.write(
+        f"[radio] pick '{st['name']}' ({st['bitrate']}kbps, {st['country']}) "
+        f"-> {key}\n")
+    sys.stderr.flush()
+    return json.dumps({
+        "status": "ready",
+        "id": key,
+        "stream_url": _radio_url(key),
     }, ensure_ascii=False)
 
 
