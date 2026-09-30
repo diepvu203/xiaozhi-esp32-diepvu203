@@ -715,6 +715,7 @@ Sếp đưa gợi ý từ Gemini; em đánh giá và chỉ áp dụng phần đ�
   An toàn: `ResetDecoder()` đã clear `audio_playback_queue_` khi Stop().
 
 ### 15.4 Server: bitrate 128k → **96k**
+> *(29/09: con số này đã cũ — hiện là `160k`, xem mục 18.)*
 - Giảm 25% băng thông cần thiết trên 2.4GHz; server dư băng thông (đo 1.9Mbps).
 - Tổng jitter tolerance sau sửa: queue 1.7s + inbuf ~4s ≈ **5.7 giây**.
 
@@ -855,14 +856,22 @@ etwork_label_: condition check (network_label_ != nullptr && ...) trước khi g
 
 ### 15. Nâng chất lượng âm thanh nhạc (23/09/2026)
 
+> ⚠️ **Mục này đã bị thay phần lớn ở mục 18 (29/09/2026).** Sửa ở đây từng gây
+> bass vỡ (xem mục 18). Giá trị **hiện hành**: bitrate `160k`, `highpass=f=100`,
+> EQ `+5 dB @250` + `+2 dB @400`, limiter `0.841`. Giữ lại mục này để thấy lịch
+> sử điều chỉnh.
+
 **Vấn đề**: Nhạc phát ra loa nghe rè/méo, kém rõ rệt so với bài hát gốc (trong khi giọng TTS nghe bình thường).
 
 **Nguyên nhân & cách sửa — server `tools/zing-music-mcp/server.py`:**
 
 1. **Bitrate MP3 quá thấp**: 96 kbps ở 24 kHz mono = 4 bit/mẫu (MP3 ở 24 kHz là MPEG-2 LSF, codec phải làm việc ở chế độ "tiết kiệm" → artifact rè/swishy khi nhạc nhiều nhạc cụ). → **128 kbps** (5.33 bit/mẫu). Băng thông chỉ tăng 12 → 16 KB/s.
+   *(29/09: đã lên tiếp **160k** — mức tràn cứng cứa MPEG-2 LSF ở 24 kHz.)*
 2. **Chất lượng nguồn (generation loss)**: yt-dlp trước đây lọc `bestaudio[abr<=128]` nên lấy bản 128k của YouTube (thường là Opus/AAC 128k) rồi encode lại sang MP3 → mất chất lượng 2 lần. → `bestaudio[abr<=192]/bestaudio[abr<=128]/bestaudio/best` để ưu tiên bản nguồn tốt hơn, giảm nhiễu lượng tử khi encode lại.
 3. **Sub-bass làm méo loa nhỏ**: loa robot không tái tạo được dưới 80 Hz; năng lượng bass sâu chỉ làm màng loa rung mạnh → méo cả dải giữa (nghe "rè" rõ nhất ở đoạn có trống/bass). → `highpass=f=80`.
+   *(29/09: chỉnh ở đây đã bị thay bằng `f=100` + EQ `+5 dB @250`/`+2 dB @400`; giữ `f=80` một mình thì nghe mỏng. Xem mục 18.)*
 4. **Clip sau giải mã**: PCM đỉnh 0 dBFS khi nhân với software volume trong `NoAudioCodec::Write` (`pow(volume/100, 2)`) và amp I2S dễ vượt biên → clip cứng nghe như rè. → `alimiter=limit=0.891` giữ đỉnh -1 dBFS.
+   *(29/09: hiện từ `limit=0.841` → -1.5 dBFS, để dư phát cho EQ mới.)*
 5. **Sample rate mismatch**: server fix cứng `-ar 24000` nên board nào có `AUDIO_OUTPUT_SAMPLE_RATE` khác (vd 16 kHz) sẽ bị ESP32 resample bằng `esp_ae_rate_cvt` (complexity 2, perf_type SPEED) — chất lượng thấp hơn resample ở server. → Sample rate / channels / bitrate / filter giờ là **biến môi trường**: `AUDIO_SAMPLE_RATE`, `AUDIO_CHANNELS`, `AUDIO_BITRATE`, `AUDIO_FILTERS` (mặc định đã khớp `bread-compact-wifi`: 24000 Hz, mono).
 6. **Log cấu hình**: khi khởi động server in `[music] audio: 24000 Hz x1, 128k mp3, filters='...'` để biết ngay cấu hình đang chạy.
 
@@ -875,4 +884,218 @@ etwork_label_: condition check (network_label_ != nullptr && ...) trước khi g
 
 **Cần làm**: restart `run.bat` (hoặc redeploy Render) để nạp `server.py` mới; muốn sạch hơn nữa đặt `AUDIO_BITRATE=160k`, muốn nhiều bass hơn đặt `AUDIO_FILTERS=highpass=f=50,alimiter=limit=0.891:level=disabled` hoặc `AUDIO_FILTERS=""`.
 
+
+
+## 16. Đa nguồn âm nhạc — SoundCloud làm nguồn chính (29/09/2026)
+
+**Vì sao làm:** YouTube chạy được vài chục bài rồi chết. Nguyên nhân đo được:
+cookie/PO token bị Google **revoke session** khi IP không cố định (Render free
+xoay IP) hoặc IP datacenter bị gắn cờ → `Sign in to confirm you're not a bot`.
+Làm cookie mới mỗi ngày là chữa triệu chứng, không phải gốc rễ.
+
+**Cách sửa:** thêm nguồn thứ hai **không dùng cơ chế nào của YouTube** (không
+cookie, không PO token, không bot-check theo IP) làm dự phòng.
+
+| | YouTube | SoundCloud |
+|---|---|---|
+| Auth | cookie + PO token (dễ hỏng) | không cần gì |
+| Bot-check theo IP | có | không |
+| Sống được | vài chục bài | lâu dài |
+| Bài Việt | đầy đủ | nhiều (J97, Sơn Tùng…) |
+
+Mặc định **đảo thứ tự** sang `soundcloud,youtube` — không phải vì SoundCloud nghe
+hay hơn, mà vì nó ổn định hơn; YouTube để sau làm dự phòng cho bài chỉ có
+trên đó. Đổi được bằng `YTDLP_SOURCES=youtube,soundcloud`.
+
+### 16.1 Bốn lỗi tìm ra khi test thật (đều do đo, không phải đoán)
+
+1. **Bài đúng đứng ở vị trí #5** → `_rank_candidates` lấy 3 kết quả rồi mới xếp
+   hạng, tức là xếp lại một tập đã sai thứ tự. Sửa: lấy đủ 10
+   (`_FETCH_PER_SOURCE`) **rồi mới** xếp hạng theo độ khớp tên
+   (`_MAX_PER_SOURCE=3` chỉ áp dụng cho thứ tự trả về).
+2. **HLS chậm & reconnect liên tục** → SoundCloud có cả `hls_aac_160k` (m3u8) và
+   `http_mp3`. m3u8 buộc đi `_download_ffmpeg` (ffmpeg tải+encode một lần, chậm,
+   hay reconnect), còn progressive đi `_fetch_chunked` + `_transcode_local` như
+   YouTube — nhanh và resume được. Sửa selector thành
+   `_SC_FORMAT = "bestaudio[protocol^=http]/bestaudio/best"`. **>60s → 13s.**
+3. **Resolve search lại y hệt lúc `search_song` vừa chạy** (tốn ~10s) → cache
+   candidate TTL 10 phút, `_rank_candidates` dùng chung cache của `search_song`.
+4. **Rò đĩa trên Render** → preload fail giữa chừng để lại file `.part`/`.src`
+
+### 16.3 Kết luận về ZingMP3 — thử đủ, không làm được
+
+Đo thật, không đoán:
+1. **Search API → `-403`** `You don't have permission` (đúng thuật toán HMAC-SHA512
+   vẫn bị chặn — đã thử lại ở mục 1).
+2. **yt-dlp `ZingMp3IE` không có `_search`** — chỉ nhận URL
+   `zingmp3.vn/bai-hat/...`; không có URL thì không lấy được id → không search
+   được bằng yt-dlp.
+3. **CDN `zmdjs.zmdcdn.me` trả 404** cho path không có đúng `128kbps` + param
+   ký → phải có signed URL từ API mà API đang chặn.
+
+→ **Bỏ hẳn ZingMP3.** SoundCloud phủ được phần lớn bài Việt quan trọng và ổn
+định hơn nhiều.
+
+### 16.4 Đo được (không phải ước lượng)
+
+| Bước | SoundCloud |
+|---|---|
+| `search` "Tam Thái Tử JACK J97" | 3.9s → 10 kết quả, early-exit ở kết quả khớp 100% |
+| resolve | 3s, `http_mp3_1_0`, probe 206 OK |
+| preload từ cache trống | **7.5s** = resolve 3 + tải 3 + transcode 2 |
+| `GET /stream/{id}.mp3` | HTTP 200, `Content-Length: 4212524`, `audio/mpeg` |
+| ffmpeg decode | rc=0, 3:30.53, 24 kHz mono 160k |
+
+`verify_resolve_ladder.py`: **63/63 PASS, exit 0**.
+
+## 17. Fix "nghe lại từ đầu" — thêm HTTP Range/resume (29/09/2026)
+
+**Triệu chứng:** robot nghe đúng một đoạn rồi nhảy về đầu bài, lặp 3/3 lần rồi
+hết; phải reset nguồn mới dừng được.
+
+**Chuỗi log chứng minh:**
+```
+E esp-tls-mbedtls: read error :-0x0050 ... Connection reset by peer
+I MusicPlayer: Stream interrupted, reconnecting (attempt 2/3)
+I MusicPlayer: Pre-buffered 65536 bytes
+```
+
+**Nguyên nhân:** Render đóng TCP giữa chừng (proxy free đóng idle sau ~60s).
+Firmware GET lại **cùng URL không kèm `Range`** → server phục vụ file từ byte 0 →
+`Pre-buffered 65536 bytes` = MP3 decoder dựng lại frame đầu → nghe lại từ đầu.
+
+
+## 18. Fix bass vỡ/rè trên remix (29/09/2026)
+
+**Triệu chứng:** cao tần rõ, bass "vỡ", remix có kick dày thì "rè rè".
+
+**Thủ phạm là chính cái sửa ở mục 15.** Lần trước thấy nghe "mỏng" nên thêm
+`+2.5 dB @110 Hz` và `+3.5 dB @200 Hz` — hai dải đó nằm đúng ở vùng loa nhỏ
+không dựng nổi. Boost ở đó không tạo ra bass nghe được, nó chỉ biến thành
+**hành động côn loa → méo**. Với bài thường boost trầm giúp ấm; với remix kick
+dày thì lượng boost đó thành rè. Không có gain nào vừa giữ được cả hai → đổi mục
+tiêu từ *bù* sang **cân bằng**.
+
+**Đã loại trừ codec** (giả thuyết thứ hai) bằng cách đo trước/sau encode
+MP3 160k trên chính bài thật: mọi dải chỉ mất **0.3–0.4 dB** (30-60 Hz
+−21.3→−21.7; 60-120 −22.1→−22.6; 2k-8k −30.7→−31.1). Codec không làm hỏng bass.
+
+**Đo trên bài thật (`sc.mp3` — đúng bài đang nghe):**
+
+| | 30-60 Hz | 60-120 Hz | % năng lượng toàn bài |
+|---|---|---|---|
+| Bản cũ | −26.2 | −23.7 | **14.8%** |
+| Bản mới | −28.1 | −26.1 | **10.9%** |
+
+Dải 150 Hz–8 kHz giữ nguyên (−20.2 → −19.9) → cắt đúng chỗ thừa, không cắt
+nhầm chỗ đang nghe.
+
+**Đáp tuyến đo được** (sine từng tần, tắt limiter/codec để tách DSP khỏi codec):
+
+| Hz | 50 | 80 | 100 | 200 | 250 | 400 | 3200 |
+|---|---|---|---|---|---|---|---|
+| Bản cũ | −3.9 | +1.3 | +2.9 | +4.4 | +3.4 | +0.8 | +2.4 |
+| Bản mới | −12.0 | −4.6 | −1.8 | +4.5 | +5.7 | +4.2 | +2.4 |
+
+**Đổi trong `_SPEAKER_EQ`:** `highpass=f=90→100`, bỏ `g=2.5@110` + `g=3.5@200`,
+thêm `g=5@250` + `g=2@400`. **Băng thông không đổi** (file MP3 160k ra đúng
+4 212 524 B, chênh 0 B).
+
+⚠️ **Đã sửa một lời giải thích sai trong code:** trước đây comment ghi "bản mới
+không vượt ngưỡng nên limiter gần như không tác động". Đo thật thì sai: trên cả
+bài thật lẫn tín hiệu remix, peak sau EQ đều chạm trần 0 dBFS ở **cả hai** bản
+(nguồn SC 128k vốn đã nén chặt) → limiter vẫn bóp ~1.5 dB như cũ. Đã sửa lại
+comment và README.
+
+**Còn lại:** các con số là phép đo trên PC. Loa 3W thật sự méo ở 60–120 Hz hay
+không thì chỉ nghe mới biết. Nếu vẫn rè: thêm `lowshelf` cắt thẳng thay vì EQ
+lồng nhau. Muốn A/B nhanh: `AUDIO_PRESET=warm` (đã có sẵn), không cần deploy.
+
+## 19. Nút wakeup dừng được nhạc (29/09/2026)
+
+**Triệu chứng:** đang phát nhạc thì không dừng được, trừ reset nguồn.
+
+**Nguyên nhân gốc:** `MusicPlayer` chạy FreeRTOS task riêng và **không tham gia
+state machine** (đọc `music_player.cc`: không `SetDeviceState`, không đụng
+mic). Nên `boot_button_.OnClick` → `app.ToggleChatState()` chỉ thao tác state
+hội thoại, còn task nhạc cứ chạy đến hết bài.
+
+## 20. Trạng thái hiện tại (29/09/2026)
+
+### ĐÃ XONG
+- [x] Nhạc hát được qua **SoundCloud** (không cần cookie/PO token).
+- [x] Search xếp hạng theo độ khớp tên — bài đúng không còn bị chôn ở #5.
+- [x] `GET /stream` hỗ trợ **Range/resume** → không còn nghe lại từ đầu.
+- [x] Nút wakeup **dừng được nhạc** → mở mic nghe ngay (chờ build + test máy).
+- [x] Bass EQ cân bằng, băng thông không đổi.
+- [x] `verify_resolve_ladder.py`: 63/63 PASS.
+
+### CÒN LẠI
+- [ ] Sếp build + flash firmware (`python scripts/build.py bread-compact-wifi`)
+      rồi test nút dừng nhạc trên máy thật.
+- [ ] Nghe lại remix sau khi deploy `speaker` mới; nếu vẫn rè thì thêm
+      `lowshelf` cắt thẳng.
+- [ ] Nếu muốn phủ bài chỉ có trên YouTube mà không bị chặn: cần proxy
+      sticky/residential sạch (đọc mục "YouTube chặn not a bot" ở README).
+
+
+**Sửa** — `main/boards/bread-compact-wifi/compact_wifi_board.cc` (28 dòng thêm,
+0 xoá, đúng 1 file):
+
+1. `IsPlaying()` → dừng nhạc, rồi mở mic nghe.
+2. Gọi **`Schedule` chứ không `ToggleChatState`**: sau khi dừng nhạc state thường
+   đã là `listening` (log thật: TTS hết câu là robot chuyển
+   `speaking → listening`), mà `ToggleChatState()` ở `listening` lại gọi
+   `CloseAudioChannel()` → robot im hẳn, phải bấm 2 lần mới nói được. Dùng
+   `StartListening()` (đã nghe thì không đổi gì, idle thì mở mic) + kèm
+   `AbortSpeaking(kAbortReasonNone)` nếu còn đang `speaking`.
+3. **Không capture `app` trong lambda**: callback nút chạy ở iot_button task,
+   lambda lại chạy ở main task *sau khi* stack frame đã thoát → tham chiếu
+   `app` là dangling. Đã gọi `Application::GetInstance()` bên trong.
+4. **`Stop()` gọi ngoài `Schedule`**: nó set cờ dừng rồi chờ task thoát
+   (`ResetDecoder()` xả queue PCM để loa im ngay) — gọi trong main task sẽ
+   block event loop tới 5s, trái quy tắc repo. Chạy ở button task thì an toàn;
+   tool `self.music.stop` hiện cũng gọi `Stop()` từ ngoài main task y hệt.
+
+**Chưa build được:** `IDF_PATH` rỗng — máy dev chưa cài ESP-IDF, nên mới xác minh
+bằng đọc mã + kiểm tra hình thức (ngoặc cân, 0 dòng vượt 100 cột của
+`.clang-format`, đúng 1 file). Sếp build lại rồi test.
+
+**Test trên máy:** bấm nút giữa lúc nhạc đang phát → nhạc dừng ngay, mic mở, nói
+được luôn. Nếu vẫn phải bấm 2 lần thì còn nhánh state chưa dự đoán (vd
+`kDeviceStateIdle` sau khi đóng audio channel).
+
+Lưu ý khi chẩn đoán: dòng `buffered 63616 B` đứng yên suốt 170s **không phải
+lỗi** — đó là bộ đệm đầy đúng nhịp phát. Chỉ `reset` mới là vấn đề.
+
+**Sửa 2 phía:**
+
+- **Firmware** (`music_player.cc`): theo dõi `stream_pos` (chỉ cộng byte **thực
+  sự decode thành công**, không cộng byte đọc trước rồi vứt) và gửi
+  `Range: bytes=<stream_pos>-` từ lần nối thứ 2. Nhận `416` = đã nghe hết →
+  dừng, thay vì retry 3 lần vô ích.
+- **Server**: `_range_start` / `_partial_file`, header `Accept-Ranges: bytes`,
+  416 kèm `Content-Range: bytes */<size>`. Chỉ nhận `bytes=N-` và `bytes=N-M`;
+  Range lạ/multipart → bỏ qua, trả 200 từ đầu (an toàn).
+- **Chi tiết dễ bỏ sót:** đường `StreamingResponse` phải **trừ phần silence
+  primer đã gửi**, vì `stream_pos` của firmware tính cả byte primer đó. Không
+  trừ thì robot nhảy vào giữa bài.
+
+**Kiểm chứng:** mô phỏng đúng kịch bản robot (đọc 20 000 B → reset →
+`Range: bytes=20000-`) → 50 000 B ghép lại liên tục, **không một byte nào phát
+lại**; 416 trả đúng `Content-Range: bytes */400000`.
+
+   5–12 MB mà `_prune_cache` chỉ quét `.mp3`, nên file tạm **không bao giờ**
+   được dọn (Render free chỉ ~1 GB). Sửa: prune xong cả file tạm + gọi
+   `_prune_cache()` ở **nhánh `failed`** (trước chỉ gọi ở nhánh thành công).
+
+### 16.2 Thêm: cooldown + số ứng viên + log nguồn
+
+- `YTDLP_SOURCE_COOLDOWN` (mặc định 900s): nguồn vừa gặp bot-check thì bỏ qua
+  15 phút, request sau không mất thêm 10–20s chờ một nguồn đang chết. Chỉ
+  bot-check mới đánh dấu cooldown — "không tìm thấy bài" là chuyện của bài đó.
+- `YTDLP_RESOLVE_CANDIDATES` (mặc định 2): thử thêm N video cùng tên khi ứng
+  viên đầu hỏng (ytsearch1 có thể trúng video 1 phút/live/cover).
+- Banner khởi động in `[music] sources: ...`; `GET /health` → `sources.cooldown`
+  để nhìn log là biết đang chạy nguồn nào.
 
