@@ -2403,7 +2403,10 @@ def get_radio_url(name: str) -> str:
     """Chuẩn bị một đài phát thanh để robot phát. Trả về NGAY {"status":
     "ready", "stream_url": "..."} — robot gọi self.music.play(stream_url).
     Radio là stream liên tục không có đầu/cuối nên KHÔNG cần chờ tải: robot
-    mở URL là nghe trực tiếp và nghe mãi cho tới khi self.music.stop. Nên
+    mở URL là nghe trực tiếp. **Lúc phát thì micro bị tắt** (firmware tắt
+    codec input để wake-word không cắt ngang phát nhạc) nên không ra lệnh
+    bằng giọng được — chỉ có 2 cách dừng: `self.music.stop` từ AI hoặc **nhấn
+    nút wakeup trên robot** (board gọi `MusicPlayer::Stop()`). Nên
     gọi search_radio trước để lấy name chính xác của trạm."""
     st = _radio_pick(name)
     key = _key_of("radio:" + st["name"] + "|" + st["url"])

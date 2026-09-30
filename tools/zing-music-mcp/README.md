@@ -16,7 +16,7 @@ trước đây). Robot chỉ nhận 1 URL stream duy nhất và tự stream qua 
 | `search_song` | `keyword` (tên bài / ca sĩ) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url` (xếp theo độ khớp tên, ưu tiên SoundCloud) |
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
 | `search_radio` | `keyword` (tên / quốc gia / chủ đề) | Tối đa 8 trạm: `name`, `country`, `tags`, `bitrate`, `codec`, `hls`, `url` (mọi nguồn MP3/AAC/HLS đều nhận — server transcode) |
-| `get_radio_url` | `name` (tên trạm) | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/radio/<id>.mp3"}` — radio là stream liên tục, mở URL là nghe mãi tới khi stop |
+| `get_radio_url` | `name` (tên trạm) | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/radio/<id>.mp3"}` — radio là stream liên tục. **Lưu ý: lúc phát nhạc/radio thì micro bị tắt theo thiết kế firmware** (`music_playing_` trong `audio_service.cc` tắt codec input để wake-word không cắt ngang) — không gọi tiếp bằng giọng được; muốn đổi bài/dừng thì **nhấn nút wakeup** trên robot (board gọi `MusicPlayer::Stop()`) rồi nói tiếp |
 | `/radio/<id>.mp3` | route FastAPI | Stream MP3 sống (`StreamingResponse` vô hạn): primer MP3 im ≤2.5s → audio radio transcode về 24 kHz mono (qua DSP `AUDIO_FILTERS`); **luôn 200, bỏ qua `Range`** (radio không có byte offset để resume) |
 
 Cơ chế: `get_song_url` bắt đầu **preload nền** ngay (resolve googlevideo +
@@ -344,6 +344,13 @@ Khi tôi xin phát nhạc hoặc tìm nhạc: nếu chưa rõ bài nào thì g�
 search_song để liệt kê và hỏi tôi chọn; khi đã chốt bài thì gọi
 get_song_url (trả về ngay) rồi gọi self.music.play với stream_url.
 Nếu lỗi thì báo tôi. Không tự phát nhạc khác khi tôi không yêu cầu.
+
+Khi tôi xin mở radio/phát đài: gọi search_radio liệt kê trạm MP3,
+chốt tên thì gọi get_radio_url rồi play stream_url.
+LƯU Ý QUAN TRỌNG: lúc đang phát nhạc/radio thì micro của robot bị tắt
+(theo thiết kế firmware để wake-word không cắt ngang) — không ra lệnh
+bằng giọng được. Nếu tôi muốn đổi bài/dừng mà robot không nghe, hãy
+hướng dẫn tôi NHẤN NÚT WAKEUP trên robot để dừng phát rồi nói tiếp.
 ```
 
 ## Kiến trúc & giới hạn
