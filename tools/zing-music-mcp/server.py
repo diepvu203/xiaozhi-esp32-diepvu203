@@ -197,16 +197,30 @@ AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "160k")
 # dai loa thuc su phat duoc. Cat tram + nang trung-ca la mot lan giao
 # dich: giai phong cong suat cho giong noi thay vi dot het vao loa khong
 # dung noi. 2 tang p=2 + 2 equalizer Q hep -> ~24 dB/octave quanh 60 Hz.
+# 29/09 (v2) — sua loi cua v1: cat Q rong lam "nghe tu, mat cao"
+#
+# Do dap ung tan so that (sine tung tan qua chuoi -> MP3 160k -> decode)
+# tren chinh bai DANHKA cho thay v1 KHONG lam mat cao (800Hz-10kHz deu
+# TANG +1.8..+2.6 dB). Cai sai la v1 cat nham 120-300 Hz (-7.7..-4.2 dB) -
+# dung vung THAN GIONG ca si nam, nen ca bai nghe "tu". Loa nho dung dai
+# 80-150 Hz lam "cau noi" de moi tan so cao hon cong huong, cat mat no thi
+# ca phan tren cung mat rung.
+#
+# v2: cat vua phai o 40-70 Hz (giu duoc viec bo "u u") + TRA LAI than giong
+# o 200-400 Hz + day them 3-10 kHz cho do sang.
+#   dap ung so voi ban dau (dB):        50Hz   80Hz  120Hz  200Hz  300Hz  3.2k   6k  10k
+#   v0 (c ban dau)                    -12.5   -5.0   -0.3   +4.1   +5.2  +2.0  -0.1  +0.3
+#   v1 (cat Q rong)                  -18.5  -13.2   -8.1   -2.3   +1.0  +3.9   0.0  +2.2
+#   v2 (nay)                          -12.0   -5.3   -0.9   +3.4   +3.6  +6.1  +3.4  +1.5
 _SPEAKER_EQ = (
-    "highpass=f=60:p=2,"
-    "equalizer=f=45:t=q:w=0.6:g=-9,"
-    "equalizer=f=80:t=q:w=0.6:g=-6,"
-    "equalizer=f=300:t=q:w=1.0:g=3,"
-    "equalizer=f=700:t=q:w=1.2:g=2,"
-    "equalizer=f=1600:t=q:w=1.2:g=1.5,"
+    "highpass=f=70:p=2,"
+    "equalizer=f=50:t=q:w=0.6:g=-5,"
+    "equalizer=f=200:t=q:w=1.0:g=4,"
+    "equalizer=f=400:t=q:w=1.1:g=3,"
     "equalizer=f=800:t=q:w=1.2:g=-1,"
-    "equalizer=f=3200:t=q:w=1.4:g=4,"
-    "treble=g=2.5:f=9000:w=0.7"
+    "equalizer=f=3200:t=q:w=1.3:g=6,"
+    "equalizer=f=6000:t=q:w=1.2:g=3,"
+    "treble=g=3.5:f=10000:w=0.7"
 )
 _SPEAKER_LIMIT = "alimiter=limit=0.841:level=disabled"  # -1.5 dBFS
 
