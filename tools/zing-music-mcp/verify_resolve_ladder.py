@@ -727,3 +727,51 @@ if FAILED:
     print(f"THAT BAI {len(FAILED)}: {', '.join(FAILED)}")
     sys.exit(1)
 print("Tat ca check PASS (ke ca radio)")
+
+
+# ---------------------------------------------------------------------------
+# Radio: danh dau tram loi + failover sang tram khac (offline, khong mang)
+# ---------------------------------------------------------------------------
+_GOOD = {"name": "Radio Bolero Tot", "url": "http://good/stream",
+         "bitrate": 128, "codec": "MP3", "hls": False, "country": "MX"}
+_BAD = {"name": "Radio Bolero Chet", "url": "http://dead/stream",
+        "bitrate": 0, "codec": "UNKNOWN", "hls": True, "country": "VN"}
+
+server._radio_mark_bad(_BAD["url"], "test")
+check("radio: _radio_mark_bad -> _radio_is_bad True",
+      server._radio_is_bad(_BAD["url"]) is True)
+check("radio: url chua danh dau -> _radio_is_bad False",
+      server._radio_is_bad(_GOOD["url"]) is False)
+
+_cq = "bolero-gia"
+with server._lock:
+    server._radio_search_cache[_cq] = {"t": time.time(),
+                                       "list": [_BAD, _GOOD]}
+try:
+    _sorted = server._radio_search(_cq)
+    check("radio: _radio_search day tram bi loi xuong cuoi",
+          _sorted[0]["url"] == _GOOD["url"], str([x["name"] for x in _sorted]))
+
+    _p = server._radio_pick("Radio Bolero")
+    check("radio: _radio_pick bo qua tram dang bi danh dau loi",
+          _p["url"] == _GOOD["url"], _p["name"])
+
+    # Tat ca deu bi danh dau loi -> van phai chon duoc (khong nem loi/rong)
+    server._radio_mark_bad(_GOOD["url"], "test het")
+    _p2 = server._radio_pick("Radio Bolero")
+    check("radio: ca 2 tram bi loi -> van chon duoc (uu tien thu lai)",
+          _p2 is not None, _p2["name"] if _p2 else "None")
+finally:
+    with server._lock:
+        server._radio_search_cache.pop(_cq, None)
+        server._radio_bad.pop(_BAD["url"], None)
+        server._radio_bad.pop(_GOOD["url"], None)
+
+check("radio: TTL loi la 10 phut (tram radio chap chon, khong chan lau)",
+      server._RADIO_BAD_TTL == 600, str(server._RADIO_BAD_TTL))
+
+print()
+if FAILED:
+    print(f"THAT BAI {len(FAILED)}: {', '.join(FAILED)}")
+    sys.exit(1)
+print("Tat ca check PASS (ke ca radio + failover)")

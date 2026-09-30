@@ -737,7 +737,28 @@ _RADIO_MIRRORS = tuple(m for m in str(os.environ.get(
 _radio_mirror = {"base": ""}       # vien dang song (khong do lai moi request)
 _radio_search_cache = {}           # query -> {t, list} (TTL 1h)
 _radio_stations = {}               # key -> {name, url, ...} (phuc vu /radio)
+_radio_bad = {}                    # url -> het han (URL chet, khong dung lai)
+# TTL ngan: tram radio hay CHAP CHON (playlist sliding window -> segment host
+# doi theo lan fetch; do duoc: ZING BOLERO lan 1 EOF sau 5.6s / 0 byte, lan 2
+# ngay sau do lai chay 30 KB/s). 30 phut se chan ca lan thu lai thanh cong.
+_RADIO_BAD_TTL = 600               # 10 phut
 _RADIO_UA = "xiaozhi-music-mcp/1.0"
+
+
+def _radio_mark_bad(url: str, why: str = "") -> None:
+    """Danh dau URL tram khong dung duoc (playlist tai duoc nhung khong co
+    audio — gap that voi HLS cua Zing: segment host khong phan hoi)."""
+    with _lock:
+        _radio_bad[url] = time.time() + _RADIO_BAD_TTL
+    sys.stderr.write(f"[radio] danh dau tram loi {_RADIO_BAD_TTL // 60} phut: "
+                     f"{url[:90]} ({why})\n")
+    sys.stderr.flush()
+
+
+def _radio_is_bad(url: str) -> bool:
+    with _lock:
+        exp = _radio_bad.get(url)
+    return bool(exp and exp > time.time())
 
 
 def _radio_api(path: str, timeout: float = 12.0):
@@ -762,6 +783,19 @@ def _radio_api(path: str, timeout: float = 12.0):
     raise RuntimeError(f"radio-browser API loi: {last_err}")
 
 
+def _radio_sort(query_norm: str, items: list) -> list:
+    """Tram chua bi danh dau loi len truoc, roi do khop ten, roi luot nghe.
+
+    Tram vua loi (URL chet: playlist 200 nhung segment khong tai duoc — gap
+    that voi ZING BOLERO HLS cua Zing CDN) bi day xuong cuoi de LLM/nguoi dung
+    khong ton 12-20s watchdog moi lan xin lai."""
+    return sorted(items,
+                  key=lambda s: (not _radio_is_bad(s["url"]),
+                                 _title_score(query_norm, s["name"]),
+                                 s.get("clicks", 0)),
+                  reverse=True)
+
+
 def _radio_search(query: str, limit: int = 40) -> list:
     """Tim dia theo ten.
 
@@ -774,7 +808,9 @@ def _radio_search(query: str, limit: int = 40) -> list:
     with _lock:
         hit = _radio_search_cache.get(q)
     if hit and time.time() - hit["t"] < 3600:
-        return hit["list"]
+        # Sap xep lai ca nhanh cache: tram co the bi danh dau loi SAU khi
+        # cache duoc tao (xem _radio_mark_bad).
+        return _radio_sort(q, hit["list"])
     path = ("/json/stations/byname/" + urllib.parse.quote(query.strip()) +
             f"?limit={limit}&order=clickcount&reverse=true&hidebroken=true")
     raw = _radio_api(path)
@@ -796,9 +832,7 @@ def _radio_search(query: str, limit: int = 40) -> list:
             "clicks": int(st.get("clickcount") or 0),
             "url": url,
         })
-    # (do khop ten, so luot nghe) nghich dao -> ten khop dung len truoc
-    out.sort(key=lambda s: (_title_score(q, s["name"]), s["clicks"]),
-             reverse=True)
+    out = _radio_sort(q, out)
     for s in out:
         s.pop("clicks", None)  # khong can gui cho LLM
     with _lock:
@@ -808,23 +842,30 @@ def _radio_search(query: str, limit: int = 40) -> list:
 
 def _radio_pick(name: str) -> dict:
     """Chon dia khop ten nhat: tim trong cac ket qua da search truoc (de LLM
-    chon tu danh sach), khong thay thi tim moi bang ten do."""
+    chon tu danh sach), khong thay thi tim moi bang ten do. Tram dang bi danh
+    dau loi duoc bo qua neu con lua chon khac."""
     want = _norm_title(name)
-    best, best_score = None, 0.0
+    cands = []
     with _lock:
         cached = list(_radio_search_cache.values())
     for hit in cached:
-        for st in hit["list"]:
-            s = _title_score(want, st["name"])
-            if s > best_score:
-                best, best_score = st, s
-    if best is None or best_score < 0.34:
-        for st in _radio_search(name, 24):
-            s = _title_score(want, st["name"])
-            if s > best_score:
-                best, best_score = st, s
+        cands.extend(hit["list"])
+    if not cands or max((_title_score(want, c["name"]) for c in cands),
+                        default=0) < 0.34:
+        cands.extend(_radio_search(name, 24))
+    good = [c for c in cands if not _radio_is_bad(c["url"])]
+    pool = good or cands
+    best, best_score = None, 0.0
+    for st in pool:
+        s = _title_score(want, st["name"])
+        if s > best_score:
+            best, best_score = st, s
     if best is None:
-        raise RuntimeError(f"khong tim thay dia '{name}' (chi lay dia MP3)")
+        raise RuntimeError(f"khong tim thay dia '{name}'")
+    if not good and best is not None:
+        sys.stderr.write(f"[radio] canh bao: moi tram khop '{name}' deu dang "
+                         f"bi danh dau loi — thu lai tram cu\n")
+        sys.stderr.flush()
     return best
 
 
@@ -2140,6 +2181,7 @@ def _radio_body(key: str, url: str):
 
     worker = threading.Thread(target=pump, daemon=True)
     worker.start()
+    total = 0
     try:
         primer = _ensure_silence()
         pace = _primer_pace()
@@ -2160,24 +2202,37 @@ def _radio_body(key: str, url: str):
                 saw_done = True   # ffmpeg chet truoc khi ra byte -> dung lai
             else:
                 yield first
+                total += len(first)
             break
-        if not saw_done:
-            live_deadline = time.time() + 20
+        if saw_done:
+            # ffmpeg thoat ngay, 0 byte: URL chet (vd HLS Zing: playlist 200
+            # nhung segment host khong phan hoi). Danh dau de lan sau khong
+            # chon lai tram nay.
+            _radio_mark_bad(url, "ffmpeg thoat ngay, 0 byte")
+        else:
+            live_deadline = time.time() + 12
             while True:
                 try:
                     item = q.get(timeout=1.0)
                 except queue.Empty:
                     if time.time() > live_deadline:
+                        if total == 0:
+                            _radio_mark_bad(url, "khong ra audio trong 12s")
                         sys.stderr.write(
-                            f"[radio] khong nhan duoc audio 20s -> dong "
-                            f"ket noi (tram dang xuong hoac song tre: "
-                            f"{url[:80]})\n")
+                            f"[radio] khong nhan duoc audio 12s ({total} B) "
+                            f"-> dong ket noi: {url[:80]}\n")
                         sys.stderr.flush()
                         return
                     continue
                 if item is done:
+                    # ffmpeg ket thuc ma khong ra byte nao -> URL chet (phai
+                    # bat o DAY nua: ffmpeg co the mat vai giay moi bo cuoc,
+                    # luc do primer loop da xong nen nhanh saw_done khong chay).
+                    if total == 0:
+                        _radio_mark_bad(url, "ffmpeg ket thuc, 0 byte audio")
                     return
-                live_deadline = time.time() + 20  # co du lieu -> gia han
+                live_deadline = time.time() + 12   # co du lieu -> gia han
+                total += len(item)
                 yield item
     finally:
         # Nguoi doc di (client ngat/timeout): danh thuc pump dang ket o put,

@@ -856,10 +856,11 @@ etwork_label_: condition check (network_label_ != nullptr && ...) trước khi g
 
 ### 15. Nâng chất lượng âm thanh nhạc (23/09/2026)
 
-> ⚠️ **Mục này đã bị thay phần lớn ở mục 18 (29/09/2026).** Sửa ở đây từng gây
-> bass vỡ (xem mục 18). Giá trị **hiện hành**: bitrate `160k`, `highpass=f=100`,
-> EQ `+5 dB @250` + `+2 dB @400`, limiter `0.841`. Giữ lại mục này để thấy lịch
-> sử điều chỉnh.
+> ⚠️ **Mục này đã bị thay phần lớn ở mục 18 và mục 21 (29/09/2026).** Sửa ở đây
+> từng gây bass vỡ (mục 18), rồi lại bị sửa ngược (mục 21). Giá trị **hiện hành**:
+> bitrate `160k`, `highpass=f=70:p=2`, `g=-5@50`, `g=+4@200`, `g=+3@400`,
+> `g=-1@800`, `g=+6@3200`, `g=+3@6000`, `treble=g=3.5:f=10000`, limiter `0.841`.
+> Giữ lại mục này để thấy lịch sử điều chỉnh.
 
 **Vấn đề**: Nhạc phát ra loa nghe rè/méo, kém rõ rệt so với bài hát gốc (trong khi giọng TTS nghe bình thường).
 
@@ -997,9 +998,9 @@ nhầm chỗ đang nghe.
 | Bản cũ | −3.9 | +1.3 | +2.9 | +4.4 | +3.4 | +0.8 | +2.4 |
 | Bản mới | −12.0 | −4.6 | −1.8 | +4.5 | +5.7 | +4.2 | +2.4 |
 
-**Đổi trong `_SPEAKER_EQ`:** `highpass=f=90→100`, bỏ `g=2.5@110` + `g=3.5@200`,
-thêm `g=5@250` + `g=2@400`. **Băng thông không đổi** (file MP3 160k ra đúng
-4 212 524 B, chênh 0 B).
+**Đổi trong `_SPEAKER_EQ` (v1 — ĐÃ BỊ SỬA NGƯỢC Ở MỤC 21, giữ lại để thấy lịch sử):**
+`highpass=f=90→100`, bỏ `g=2.5@110` + `g=3.5@200`, thêm `g=5@250` + `g=2@400`.
+Băng thông không đổi (file MP3 160k ra đúng 4 212 524 B, chênh 0 B).
 
 ⚠️ **Đã sửa một lời giải thích sai trong code:** trước đây comment ghi "bản mới
 không vượt ngưỡng nên limiter gần như không tác động". Đo thật thì sai: trên cả
@@ -1033,8 +1034,9 @@ hội thoại, còn task nhạc cứ chạy đến hết bài.
 ### CÒN LẠI
 - [ ] Sếp build + flash firmware (`python scripts/build.py bread-compact-wifi`)
       rồi test nút dừng nhạc trên máy thật.
-- [ ] Nghe lại remix sau khi deploy `speaker` mới; nếu vẫn rè thì thêm
-      `lowshelf` cắt thẳng.
+- [ ] Nghe lại bài DANHKA sau khi deploy chuỗi **v2** (mục 21): trầm đã bớt
+      "ù" nhưng phần cao có trở lại không. Nếu vẫn tù → nguyên nhân nằm ở bản
+      nén 128k của SoundCloud, khi đó phải **đổi nguồn** chứ không chỉnh EQ.
 - [ ] Nếu muốn phủ bài chỉ có trên YouTube mà không bị chặn: cần proxy
       sticky/residential sạch (đọc mục "YouTube chặn not a bot" ở README).
 
@@ -1085,11 +1087,12 @@ lỗi** — đó là bộ đệm đầy đúng nhịp phát. Chỉ `reset` mới
 `Range: bytes=20000-`) → 50 000 B ghép lại liên tục, **không một byte nào phát
 lại**; 416 trả đúng `Content-Range: bytes */400000`.
 
-   5–12 MB mà `_prune_cache` chỉ quét `.mp3`, nên file tạm **không bao giờ**
-   được dọn (Render free chỉ ~1 GB). Sửa: prune xong cả file tạm + gọi
-   `_prune_cache()` ở **nhánh `failed`** (trước chỉ gọi ở nhánh thành công).
+### 16.2 Dọn file tạm `.part`/`.src` + cooldown + số ứng viên
 
-### 16.2 Thêm: cooldown + số ứng viên + log nguồn
+**Rò đĩa trên Render:** preload fail giữa chừng để lại file `.part`/`.src` 5–12 MB,
+mà `_prune_cache` chỉ quét `.mp3` → file tạm **không bao giờ** được dọn (Render free
+chỉ ~1 GB). Sửa: prune xong cả file tạm + gọi `_prune_cache()` ở **nhánh `failed`**
+(trước chỉ gọi ở nhánh thành công). Test chứng minh vẫn giữ file của bài đang preload.
 
 - `YTDLP_SOURCE_COOLDOWN` (mặc định 900s): nguồn vừa gặp bot-check thì bỏ qua
   15 phút, request sau không mất thêm 10–20s chờ một nguồn đang chết. Chỉ
@@ -1099,3 +1102,71 @@ lại**; 416 trả đúng `Content-Range: bytes */400000`.
 - Banner khởi động in `[music] sources: ...`; `GET /health` → `sources.cooldown`
   để nhìn log là biết đang chạy nguồn nào.
 
+## 21. Fix "u u" bai DANHKA, roi sua nguoc vi mat cao (29/09/2026)
+
+Bai nay ("Bat con buom vang", full track 330 s) nghe **am tram u u** va **giong
+ca si khong ro**. Do bang FFT tren chinh bai nay (467 doan pho, 40 s dau):
+
+| Dai | % cong suat |
+|---|---|
+| 40-60 Hz | **61.8%** |
+| 50-70 Hz | 47.9% |
+| 0-120 Hz | **88.3%** |
+| 2-8 kHz (giong nguoi) | **2.2%** |
+
+Tien "om om" cua giong nam tram nam dung o 50-70 Hz. Bai o muc 18 chi co 14.8%
+duoi 120 Hz -> **bai khac nhau ve dac tinh, nen mot chuoi filter khong the
+chieu ca hai**. Loai tru 3 gia thuyet khac truoc khi ket luan: khong phai
+codec (MP3 160k chi mat 0.3 dB), khong phai loi DC (DC = -1.2, sach), khong
+phai thieu headroom.
+
+### v1 — cat manh 30-90 Hz: bo duoc "u", nhung lam mat cao
+
+Sua `highpass=f=100` -> `f=60:p=2` + 2 equalizer Q hep o 45/80 Hz. Ket qua:
+bam "u u" di, nhung robot bao **"nghe tu, mat cao"**.
+
+### Nguyên nhân — do dap ung tan so, khong phai do bang
+
+**Phai do dap ung tan so that** (sine tung tan qua chuoi -> MP3 160k -> decode,
+tren chinh bai nay) chu khong phai pho cong suat. Ket qua:
+
+| Hz | v0 (c ban dau) | v1 (cat Q rong) | |
+|---|---|---|---|
+| 120 | -0.3 | **-8.1** | <- cat oan |
+| 200 | +4.1 | **-2.3** | <- cat oan |
+| 300 | +5.2 | +1.0 | |
+| 3200 | +2.0 | +3.9 | |
+| 10000 | +0.3 | +2.2 | |
+
+v1 **khong lam mat cao** — 800 Hz tro len deu TANG. Cai sai la cat nham
+**120-300 Hz**, dung vung **than giong ca si nam**. Loa nho dung dai 80-150 Hz
+lam "cau noi" de moi tan so cao hon cong huong; cat mat no thi ca phan tren
+cung mat rung.
+
+> ⚠️ **Bai hoc (2 lan sai lien tiep):** ca muc 18 lan 1 va muc 21 lan 1 deu
+> do bang **nang luong theo dai** roi ket luan, ca hai lan dan toi chinh sai.
+> Do pho tan so chi noi "co bao nhieu nang luong o do", khong noi "thanh
+> phan do bi sua doi bao nhieu". **Chinh EQ thi dap ung tan so moi la thuoc
+> do dung de chinh EQ.**
+
+### v2 — giu muc cat tram, tra lai than giong, day them cao
+
+Chuoi hien hanh trong `_SPEAKER_EQ`:
+`highpass=f=70:p=2`, `g=-5@50`, `g=+4@200`, `g=+3@400`, `g=-1@800`,
+`g=+6@3200`, `g=+3@6000`, `treble=g=3.5:f=10000`.
+
+Dap ung do duoc (dB so voi ban dau, 0 = doc nguyen):
+
+| Hz | v0 | v1 (sai) | **v2 (nay)** |
+|---|---|---|---|
+| 50 | -12.5 | -18.5 | **-12.0** (giu duoc chong "u") |
+| 200 | +4.1 | -2.3 | **+3.4** (tra lai than giong) |
+| 300 | +5.2 | +1.0 | **+3.6** |
+| 3200 | +2.0 | +3.9 | **+6.1** |
+| 6000 | -0.1 | +0.0 | **+3.4** |
+
+**Bang thong khong doi:** MP3 40 s ra 801 644 B o ca v0 va v2 (chenh 0 B).
+
+**Chua kiem chung duoc:** do tren PC, khong phai tren loa 3W that. Neu nghe
+van tu, nguyen nhan co kha nang nam o **ban nen 128k cua SoundCloud da mat dai
+cao truoc khi toi server** — khi do huong sua la **doi nguon**, khong phai EQ.
