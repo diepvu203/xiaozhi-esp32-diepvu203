@@ -2159,7 +2159,7 @@ def _radio_body(key: str, url: str):
     # co jitter buffer 1.7s) nhung han chet trong truong hop client ngat.
     q = queue.Queue(maxsize=256)
     stop_evt = threading.Event()
-    _qd = ("done", None)
+    done = object()
 
     def pump():
         gen = _ffmpeg_chunks(url, live=True)
