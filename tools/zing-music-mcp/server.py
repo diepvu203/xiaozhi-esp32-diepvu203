@@ -2150,24 +2150,41 @@ def _radio_body(key: str, url: str):
     - drain co watchdog 20s: ffmpeg khong ra byte nao (tram chet, network
       sung...) -> dong response, firmware thay mat ket noi nen retry 3 lan
       roi dung sach se, thay vi treo vo thuong trong vong pre-buffer.
-    - client ngat (q.put bi chan khi queue day) -> stop_evt ra hieu, pump
-      thoat, gen.close() goi finally cua _ffmpeg_chunks de kill ffmpeg. Neu
-      khong, moi request ngat de lai 1 ffmpeg mo (moi radio hoat dong lien
-      tuc thi tich dan phai restart Render)."""
-    q = queue.Queue(maxsize=512)
-    done = object()
+    - client ngat: (a) response gen .close() -> finally set stop_evt -> pump
+      thoat -> gen.close() kill ffmpeg; (b) ket noi tren Render/uvicorn chi
+      that bai sau ~1-2 phut backpressure nen pump co gioi han rieng: queue
+      TRUNG lien tuc 30s = coi la client ngat -> break + gen.close(). Moi
+      request chi de lai ffmpeg trong vong ~30s, khong tich dan."""
+    # 256 chunk x 16 KB = ~4 MB ~ 80s audio: du de buffer WiFi gap (robot
+    # co jitter buffer 1.7s) nhung han chet trong truong hop client ngat.
+    q = queue.Queue(maxsize=256)
     stop_evt = threading.Event()
+    _qd = ("done", None)
 
     def pump():
         gen = _ffmpeg_chunks(url, live=True)
+        full_since = None
         try:
             for chunk in gen:
                 if stop_evt.is_set():
                     break
                 try:
                     q.put(chunk, timeout=0.5)
+                    full_since = None
                 except queue.Full:
-                    if stop_evt.is_set():
+                    # Queue day = nguoi doc (HTTP response) khong lay ra duoc
+                    # -> socket de nghich (client dang nghe). Neu queue TRUNG
+                    # 30s liên tuc thi coi la client da ngat (robot stop ->
+                    # FIN; Render/uvicorn chi phat hien khi socket write that
+                    # bai sau ~1-2 phut backpressure — phai co gioi han de
+                    # khong de ffmpeg + 4 MB queue chay oan lan nua).
+                    if full_since is None:
+                        full_since = time.time()
+                    elif time.time() - full_since > 30:
+                        sys.stderr.write(
+                            "[radio] queue day lien tuc 30s -> coi la client "
+                            "dat ngat, dong stream\n")
+                        sys.stderr.flush()
                         break
         except Exception as exc:
             sys.stderr.write(f"[radio] ffmpeg loi: {exc}\n")
@@ -2177,7 +2194,15 @@ def _radio_body(key: str, url: str):
                 gen.close()
             except Exception:
                 pass
-            q.put(done)
+            # Dax cap CHUONGRU queue (du lieu cua client da mat) de
+            # put(done) khong bi chan; de NGUYEN item done: neu reader con
+            # song se thuoc duoc `done` va thoat trong sach.
+            try:
+                while True:
+                    _tag, _ = q.get_nowait()
+            except queue.Empty:
+                pass
+            q.put(_qd)
 
     worker = threading.Thread(target=pump, daemon=True)
     worker.start()
