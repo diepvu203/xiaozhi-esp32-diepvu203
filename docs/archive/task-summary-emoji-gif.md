@@ -1,3 +1,23 @@
+> ⚠️ **FILE LƯU TRỮ (ARCHIVED) — 02/10/2026**
+>
+> File này gộp lộn xộn nhiều tính năng (emoji/GIF, LED, motor/ToF, music, radio,
+> debugging). Nội dung đã được **tách sang các file chuyên biệt** trong `docs/`:
+>
+> | Nội dung | File mới |
+> |---|---|
+> | Emoji + GIF OLED | [`../emoji-gif-display.md`](../emoji-gif-display.md) |
+> | LED qua giọng nói | [`../led-control.md`](../led-control.md) |
+> | Motor N20 + L298N + ToF + nhiễu điện từ | [`../robot-movement.md`](../robot-movement.md) |
+> | Music streaming (SoundCloud/YouTube) | [`../music-streaming.md`](../music-streaming.md) |
+> | Chỉnh EQ / chất lượng âm thanh | [`../audio-quality-tuning.md`](../audio-quality-tuning.md) |
+> | Radio streaming | [`../radio-streaming.md`](../radio-streaming.md) |
+> | Các lỗi đã gặp + cách sửa | [`../troubleshooting.md`](../troubleshooting.md) |
+>
+> Giữ lại nguyên văn để tham khảo **lịch sử chi tiết** (số đo, log, diễn biến từng ngày).
+> Nguồn sự thật hiện hành là các file ở trên + code.
+
+---
+
 # Tóm Tắt Công Việc: Emoji Biểu Cảm + GIF Động trên OLED 128x64
 
 > **Quy ước xưng hô**: Gọi người dùng là **"sếp"**, tự xưng là **"em"** (áp dụng cho mọi

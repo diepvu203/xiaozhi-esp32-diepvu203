@@ -113,3 +113,32 @@
   cần build lại firmware.
 - Có thể hướng dẫn AI gọi tool theo yêu cầu qua system prompt.
 - Giới hạn prompt ~2000 từ (quan sát; chưa xác minh con số chính thức).
+---
+
+## 8. Tài liệu liên quan (đã tách file)
+
+File này chỉ giữ **kiến thức kiến trúc firmware/server**. Nội dung tính năng đã tách riêng:
+
+| File | Nội dung |
+|---|---|
+| [`README.md`](README.md) | Index toàn bộ tài liệu `docs/` |
+| [`emoji-gif-display.md`](emoji-gif-display.md) | Emoji & GIF trên OLED 128x64 |
+| [`led-control.md`](led-control.md) | LED qua giọng nói (GPIO 11) |
+| [`robot-movement.md`](robot-movement.md) | Motor N20 + L298N + ToF + nhiễu điện từ |
+| [`music-streaming.md`](music-streaming.md) | Music streaming (SoundCloud/YouTube) |
+| [`audio-quality-tuning.md`](audio-quality-tuning.md) | Speaker EQ / DSP tuning |
+| [`radio-streaming.md`](radio-streaming.md) | Radio streaming (Live Radio) |
+| [`troubleshooting.md`](troubleshooting.md) | Các lỗi đã gặp + cách sửa |
+| [`../tools/zing-music-mcp/README.md`](../tools/zing-music-mcp/README.md) | Vận hành MCP server nhạc (env vars, deploy) |
+| [`archive/task-summary-emoji-gif.md`](archive/task-summary-emoji-gif.md) | Tài liệu lịch sử gộp (đã tách) |
+
+### Ghi chú liên quan tới server xiaozhi.me
+
+- **Tính cách / vai trò AI** chỉnh trực tiếp trên trang **xiaozhi.me** (phần quản lý thiết
+  bị → prompt/vai trò). Firmware không giữ prompt — đổi tính cách **không cần build lại**.
+- Có thể **hướng dẫn AI gọi tool theo yêu cầu** bằng system prompt (vd quy tắc di chuyển:
+  chỉ tiến khi còn sàn, khi nào gọi `self.motor.move`, khi nào cảnh báo mép bàn).
+- **Giới hạn prompt ~2000 từ** (quan sát; chưa xác minh con số chính thức).
+- **Đổi model LLM**: server có thể lỗi `fetch failed` khi model cấu hình hỏng
+  (đã gặp với DeepSeek → đổi sang Qwen là hết). Xem
+  [`troubleshooting.md`](troubleshooting.md) mục 11.

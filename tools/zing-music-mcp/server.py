@@ -2202,7 +2202,7 @@ def _radio_body(key: str, url: str):
                     _tag, _ = q.get_nowait()
             except queue.Empty:
                 pass
-            q.put(_qd)
+            q.put(done)
 
     worker = threading.Thread(target=pump, daemon=True)
     worker.start()
