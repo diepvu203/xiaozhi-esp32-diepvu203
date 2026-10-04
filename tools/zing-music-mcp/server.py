@@ -61,6 +61,7 @@ import re
 import shutil
 import socket
 import subprocess
+import secrets
 import sys
 import tempfile
 import threading
@@ -1363,6 +1364,43 @@ def _resolve(key: str, title: str) -> dict:
 # Các endpoint HTTP stream của FastAPI; được Mount vào Starlette app của MCP
 # ngay bên dưới (mcp._custom_starlette_routes) nên chạy chung một cổng với MCP.
 stream_app = FastAPI()
+_DEBUG_NOTIFY_LOCK = threading.Lock()
+
+
+@stream_app.get("/debug/notify-finished")
+def debug_notify_finished(request: Request):
+    """Inject one test notification through the existing MCP stdio pipe.
+
+    Protect this temporary route with a separate secret; keep it disabled unless
+    DEBUG_NOTIFY_TOKEN is configured. Only useful with MCP_TRANSPORT=stdio.
+    """
+    expected = os.environ.get("DEBUG_NOTIFY_TOKEN", "")
+    provided = request.headers.get("x-debug-notify-token", "")
+    if not expected:
+        raise HTTPException(404, "not found")
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(403, "forbidden")
+    if MCP_TRANSPORT != "stdio":
+        raise HTTPException(409, "notification injection requires MCP_TRANSPORT=stdio")
+
+    title = "Hoa Hao Do - Probe Test 12345"
+    notification = {
+        "jsonrpc": "2.0",
+        "method": "notifications/music_finished",
+        "params": {
+            "title": title,
+            "artist": "Probe",
+            "played_ms": 192000,
+            "message": f"Bai hat da phat xong: {title}",
+        },
+    }
+    # One write + flush ensures the stdio pipe sees one complete JSON-RPC line.
+    # Serialize against any other writes from this route.
+    with _DEBUG_NOTIFY_LOCK:
+        sys.stdout.write(json.dumps(notification, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    return JSONResponse({"ok": True, "sent": True, "title": title})
+
 
 
 # ---------------------------------------------------------------------------
