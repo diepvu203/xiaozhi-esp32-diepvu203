@@ -42,6 +42,17 @@
 #define DISPLAY_RST_PIN       GPIO_NUM_45
 #define DISPLAY_CS_PIN        GPIO_NUM_41
 
+// Motor driver L298N (2x N20 wheel motors)
+#define MOTOR_L_IN1 GPIO_NUM_1
+#define MOTOR_L_IN2 GPIO_NUM_2
+#define MOTOR_R_IN1 GPIO_NUM_3
+#define MOTOR_R_IN2 GPIO_NUM_8
+
+// ToF VL53L0X cliff sensor
+#define TOF_I2C_SDA GPIO_NUM_17
+#define TOF_I2C_SCL GPIO_NUM_39
+#define TOF_XSHUT   GPIO_NUM_10
+
 
 #ifdef CONFIG_LCD_ST7789_240X320
 #define LCD_TYPE_ST7789_SERIAL

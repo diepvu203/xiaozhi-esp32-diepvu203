@@ -1046,7 +1046,7 @@ set(MAIN_PRIV_REQUIRES_EXTRA "")
 # bread-compact-wifi (xe robot): driver VL53L0X cho cam bien chong roi.
 # Bien dich thang nguon .c cua components/vl53l0x vao main (co che component
 # discovery khong nhan component nay trong cau hinh MINIMAL_BUILD cua du an).
-if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
+if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI OR CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_LCD)
     file(GLOB VL53L0X_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/src/*.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/../components/vl53l0x/private/core/src/*.c"
@@ -1113,7 +1113,7 @@ idf_component_register(SRCS ${SOURCES}
                     )
 
 # Define cho driver VL53L0X (nguon goc dat PUBLIC USE_I2C_2V8=1)
-if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
+if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI OR CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_LCD)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE USE_I2C_2V8=1)
 endif()
 

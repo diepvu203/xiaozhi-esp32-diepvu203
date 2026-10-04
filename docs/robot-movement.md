@@ -2,6 +2,11 @@
 
 > **Board**: bread-compact-wifi — OLED SSD1306 128x64, LED GPIO 11, firmware v2.4.2
 
+> The robot features have also been ported to the separate LCD variant
+> `bread-compact-wifi-lcd`. Its display selection and pin assignments differ;
+> see [bread-compact-wifi-lcd.md](./bread-compact-wifi-lcd.md) before wiring or
+> building that variant.
+
 ## 1. Sơ đồ chân
 
 ### Motor (L298N)
@@ -123,7 +128,7 @@
 
 ## 8. Build ToF VL53L0X (ghi chú)
 
-- Component: `components/vl53l0x/` (đã vendor vào repo); nguồn private core/platform glob trong `main/CMakeLists.txt` khi `CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI`
+- Component: `components/vl53l0x/` (đã vendor vào repo); nguồn private core/platform glob trong `main/CMakeLists.txt` cho cả `CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI` và `CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_LCD`
 - Thêm `target_compile_definitions(... USE_I2C_2V8=1)`
 - Kiểm chứng: `nm` thấy đủ symbol, `libmain.a` chứa 9 file .obj vl53
 - **KHÔNG dùng GPIO35/36/37** — các chân này là PSRAM octal trên ESP32-S3

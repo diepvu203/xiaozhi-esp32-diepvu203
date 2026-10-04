@@ -1,13 +1,16 @@
+#include "application.h"
 #include "wifi_board.h"
 #include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
 #include "system_reset.h"
-#include "application.h"
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
+#include "motor_controller.h"
+#include "music_player.h"
+#include "tof_sensor.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -129,13 +132,66 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
+            if (MusicPlayer::GetInstance().IsPlaying()) {
+                app.Schedule([]() {
+                    auto& scheduled_app = Application::GetInstance();
+                    MusicPlayer::GetInstance().Stop();
+                    if (scheduled_app.GetDeviceState() == kDeviceStateSpeaking) {
+                        scheduled_app.AbortSpeaking(kAbortReasonNone);
+                    }
+                    if (scheduled_app.GetDeviceState() != kDeviceStateListening) {
+                        scheduled_app.StartListening();
+                    }
+                });
+                return;
+            }
             app.ToggleChatState();
         });
+    }
+
+    MotorController& GetMotor() {
+        static MotorController motor(MOTOR_L_IN1, MOTOR_L_IN2, MOTOR_R_IN1, MOTOR_R_IN2);
+        return motor;
     }
 
     // 物联网初始化，添加对 AI 可见设备
     void InitializeTools() {
         static LampController lamp(LAMP_GPIO);
+        static TofSensor tof(TOF_I2C_SDA, TOF_I2C_SCL, TOF_XSHUT);
+        auto& motor = GetMotor();
+
+        auto& mcp_server = McpServer::GetInstance();
+        PropertyList music_properties;
+        music_properties.AddProperty(Property("url", kPropertyTypeString));
+        mcp_server.AddTool("self.music.play", "Play a song or radio station from the given MP3 stream URL.",
+                           music_properties, [](const PropertyList& properties) -> ReturnValue {
+                               const auto url = properties["url"].value<std::string>();
+                               if (!MusicPlayer::GetInstance().Play(url)) {
+                                   throw std::runtime_error("Music is already playing");
+                               }
+                               return true;
+                           });
+        mcp_server.AddTool("self.music.stop", "Stop the currently playing music", PropertyList(),
+                           [](const PropertyList&) -> ReturnValue {
+                               MusicPlayer::GetInstance().Stop();
+                               return true;
+                           });
+        mcp_server.AddTool("self.music.get_state", "Check whether music is currently playing",
+                           PropertyList(), [](const PropertyList&) -> ReturnValue {
+                               return MusicPlayer::GetInstance().IsPlaying()
+                                          ? "{\"playing\": true}"
+                                          : "{\"playing\": false}";
+                           });
+
+        if (tof.IsReady()) {
+            TofSensor* tof_ptr = &tof;
+            motor.SetDistanceReader([tof_ptr]() { return tof_ptr->ReadDistanceMm(); });
+            motor.SetWakeNotifier([](const std::string& message) {
+                ESP_LOGI(TAG, "Cliff warning: %s", message.c_str());
+            });
+        } else {
+            ESP_LOGW(TAG, "VL53L0X not ready; forward cliff guard disabled");
+        }
     }
 
 public:
@@ -154,6 +210,11 @@ public:
     virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);
         return &led;
+    }
+
+    void OnWakeWordDetected() override {
+        ESP_LOGI(TAG, "Wake word detected: wiggle feedback");
+        GetMotor().Wiggle();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
