@@ -123,6 +123,7 @@ void MusicPlayer::StreamTask(std::string url) {
     // bien nay, moi lan reconnect lai nghe tu dau bai (mat ~20 giay da
     // phat) — trieu chung "nghe mot ti roi quay lai ban dau".
     size_t stream_pos = 0;
+    bool completed_normally = false;
 
     // Mute TTS immediately so it does not compete for the radio while we are
     // connecting/reconnecting to the music server.
@@ -210,6 +211,7 @@ void MusicPlayer::StreamTask(std::string url) {
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             client = nullptr;
+            completed_normally = true;
             break;
         }
 
@@ -462,9 +464,10 @@ void MusicPlayer::StreamTask(std::string url) {
             audio.PushPcmToPlaybackQueue(std::move(pending));
             pending.clear();
         }
-        if (!will_retry) {
+        if (!will_retry && !stop_requested_.load() && eos) {
             ESP_LOGI(TAG, "Stream finished, ~%lu k samples written, %d decode errors",
                      (unsigned long)(pcm_written / 1000), decode_err_count);
+            completed_normally = true;
             break;  // song finished successfully, exit retry loop
         }
         // will_retry == true: stream failed mid-way, continue to reconnect.
@@ -488,5 +491,14 @@ void MusicPlayer::StreamTask(std::string url) {
     }
     ESP_LOGI(TAG, "Music task exit (buffers freed)");
     audio.SetMusicPlaying(false);  // unmute TTS now that music has stopped
+    if (completed_normally && !stop_requested_.load()) {
+        // Wait for queued PCM to finish before enabling mic/audio processing.
+        while (!audio.IsPlaybackIdle() && !stop_requested_.load()) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (!stop_requested_.load()) {
+            Application::GetInstance().StartListening();
+        }
+    }
     FinishTask();
 }
