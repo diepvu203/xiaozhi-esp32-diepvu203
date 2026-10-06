@@ -2539,6 +2539,37 @@ def _duckduckgo_html_search(query: str, n: int) -> list:
     return out
 
 
+def _duckduckgo_lite_search(query: str, n: int) -> list:
+    url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
+    html = _http_get(url, timeout=10)
+    out = []
+    # Lite HTML dùng các link kết quả class="result-link"
+    for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*class="result-link"[^>]*>(.*?)</a>', html, re.S):
+        link = _unwrap_ddg(m.group(1))
+        title = _strip_html(m.group(2))
+        if not link.startswith(("http://", "https://")):
+            continue
+        out.append({"title": title, "snippet": "", "url": link})
+        if len(out) >= n:
+            break
+    return out
+
+
+def _mojeek_search(query: str, n: int) -> list:
+    url = "https://www.mojeek.com/search?q=" + urllib.parse.quote(query)
+    html = _http_get(url, timeout=10)
+    out = []
+    for m in re.finditer(r'<h2[^>]*>.*?<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S):
+        link = m.group(1)
+        if not link.startswith(("http://", "https://")):
+            continue
+        title = _strip_html(m.group(2))
+        out.append({"title": title, "snippet": "", "url": link})
+        if len(out) >= n:
+            break
+    return out
+
+
 def _web_search(query: str, n: int = 5) -> list:
     n = max(1, min(n, 10))
     try:
@@ -2547,11 +2578,18 @@ def _web_search(query: str, n: int = 5) -> list:
             return res
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"[web] Google CSE failed: {e}\n")
-    try:
-        return _duckduckgo_html_search(query, n)
-    except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"[web] DuckDuckGo failed: {e}\n")
-        return []
+    errors = []
+    for fn in (_duckduckgo_lite_search, _duckduckgo_html_search, _mojeek_search):
+        try:
+            res = fn(query, n)
+            if res:
+                return res
+            errors.append(fn.__name__ + ": empty")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{fn.__name__}: {e}")
+            sys.stderr.write(f"[web] {fn.__name__} failed: {e}\n")
+    sys.stderr.write("[web] no fallback returned results: " + " | ".join(errors) + "\n")
+    return []
 
 
 def _web_open(url: str, max_chars: int = 3000) -> str:
