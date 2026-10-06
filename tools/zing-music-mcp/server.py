@@ -2463,6 +2463,106 @@ def _maybe_prefetch(res: list, query: str) -> None:
     sys.stderr.flush()
 
 
+# ---------------------------------------------------------------------------
+# Web search bridge — miễn phí, không dùng quota Xiaozhi
+# ---------------------------------------------------------------------------
+def _http_get(url: str, headers: dict | None = None, timeout: float = 20.0) -> str:
+    req = urllib.request.Request(url, headers=headers or {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/126.0.0.0 Safari/537.36"),
+        "Accept-Language": "vi,en;q=0.8",
+    })
+    return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
+
+
+def _strip_html(text: str) -> str:
+    import html as _html
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _google_cse_search(query: str, n: int) -> list:
+    key = os.environ.get("GOOGLE_CSE_API_KEY", "").strip()
+    cx = os.environ.get("GOOGLE_CSE_CX", "") or os.environ.get("GOOGLE_CSE_ID", "")
+    if not key or not cx.strip():
+        return []
+    url = ("https://www.googleapis.com/customsearch/v1?key=" + urllib.parse.quote(key) +
+           "&cx=" + urllib.parse.quote(cx.strip()) +
+           "&q=" + urllib.parse.quote(query) + f"&num={min(n, 10)}")
+    data = json.loads(_http_get(url, timeout=15))
+    out = []
+    for item in (data.get("items") or [])[:n]:
+        out.append({
+            "title": item.get("title"),
+            "snippet": item.get("snippet"),
+            "url": item.get("link"),
+        })
+    return out
+
+
+def _unwrap_ddg(link: str) -> str:
+    try:
+        q = urllib.parse.urlparse(link)
+        if "duckduckgo.com" in (q.hostname or "") and q.path.startswith("/l/"):
+            uddg = urllib.parse.parse_qs(q.query).get("uddg", [""])[0]
+            if uddg:
+                return urllib.parse.unquote(uddg)
+    except Exception:  # noqa: BLE001
+        pass
+    return link
+
+
+def _duckduckgo_html_search(query: str, n: int) -> list:
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+    html = _http_get(url, timeout=15)
+    out = []
+    for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S):
+        link = _unwrap_ddg(m.group(1))
+        if link.startswith("http://") is False and link.startswith("https://") is False:
+            continue
+        if "duckduckgo.com/y.js" in link:
+            continue
+        title = _strip_html(m.group(2))
+        if link.startswith("//"):
+            link = "https:" + link
+        elif not link.startswith("http"):
+            continue
+        sn_m = re.search(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html[m.end():m.end()+2000], re.S)
+        snippet = _strip_html(sn_m.group(1)) if sn_m else ""
+        out.append({"title": title, "snippet": snippet, "url": link})
+        if len(out) >= n:
+            break
+    return out
+
+
+def _web_search(query: str, n: int = 5) -> list:
+    n = max(1, min(n, 10))
+    try:
+        res = _google_cse_search(query, n)
+        if res:
+            return res
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[web] Google CSE failed: {e}\n")
+    try:
+        return _duckduckgo_html_search(query, n)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[web] DuckDuckGo failed: {e}\n")
+        return []
+
+
+def _web_open(url: str, max_chars: int = 3000) -> str:
+    try:
+        html = _http_get(url, timeout=20)
+        text = _strip_html(html)
+        return text[:max_chars]
+    except Exception as e:  # noqa: BLE001
+        return f"ERROR: {e}"
+
+
 @mcp.tool()
 def search_song(keyword: str) -> str:
     """Tìm bài hát theo tên (hoặc tên + ca sĩ). Trả về tối đa 5 kết quả:
@@ -2539,6 +2639,27 @@ def get_radio_url(name: str) -> str:
         "id": key,
         "stream_url": _radio_url(key),
     }, ensure_ascii=False)
+
+
+@mcp.tool()
+def web_search(keyword: str, max_results: int = 5) -> str:
+    """Tìm kiếm web trả về tối đa max_results kết quả (title, snippet, url).
+    Ưu tiên Google Custom Search API miễn phí (100 lượt/ngày) nếu có cấu hình
+    GOOGLE_CSE_API_KEY/CX, nếu không sẽ dùng DuckDuckGo HTML không cần key.
+    Dùng web_open để đọc chi tiết 1 URL."""
+    res = _web_search(keyword, max_results)
+    sys.stderr.write(f"[web] search '{keyword}' -> {len(res)} ket qua\n")
+    sys.stderr.flush()
+    return json.dumps({"results": res}, ensure_ascii=False)
+
+
+@mcp.tool()
+def web_open(url: str, max_chars: int = 3000) -> str:
+    """Mở và trích nội dung chính của 1 URL để tóm tắt/đọc chi tiết."""
+    text = _web_open(url, max_chars)
+    sys.stderr.write(f"[web] open '{url}' -> {len(text)} chars\n")
+    sys.stderr.flush()
+    return json.dumps({"url": url, "content": text}, ensure_ascii=False)
 
 
 if __name__ == "__main__":
