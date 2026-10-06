@@ -2466,7 +2466,10 @@ def _maybe_prefetch(res: list, query: str) -> None:
 # ---------------------------------------------------------------------------
 # Web search bridge — miễn phí, không dùng quota Xiaozhi
 # ---------------------------------------------------------------------------
-def _http_get(url: str, headers: dict | None = None, timeout: float = 20.0) -> str:
+# Ưu tiên các API chính thức có free tier (Tavily 1000/tháng, Brave, SerpAPI
+# 100/tháng). Nếu không có key thì dùng wikipedia/mojeek fallback.
+# ---------------------------------------------------------------------------
+def _http_get(url: str, headers: dict | None = None, timeout: float = 15.0) -> str:
     req = urllib.request.Request(url, headers=headers or {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -2476,6 +2479,15 @@ def _http_get(url: str, headers: dict | None = None, timeout: float = 20.0) -> s
     return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
 
 
+def _http_post_json(url: str, body: dict, headers: dict | None = None, timeout: float = 10.0) -> dict:
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    h = {"Content-Type": "application/json", "User-Agent": "xiaozhi-mcp/1.0"}
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(url, data=data, headers=h)
+    return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace"))
+
+
 def _strip_html(text: str) -> str:
     import html as _html
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.S)
@@ -2483,6 +2495,44 @@ def _strip_html(text: str) -> str:
     text = _html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _tavily_search(query: str, n: int) -> list:
+    key = (os.environ.get("TAVILY_API_KEY") or "").strip()
+    if not key:
+        return []
+    body = {"api_key": key, "query": query, "max_results": n, "include_answer": False}
+    resp = _http_post_json("https://api.tavily.com/search", body, timeout=10)
+    out = []
+    for item in (resp.get("results") or [])[:n]:
+        out.append({"title": item.get("title"), "snippet": item.get("content", "")[:500], "url": item.get("url")})
+    return out
+
+
+def _brave_search(query: str, n: int) -> list:
+    key = (os.environ.get("BRAVE_API_KEY") or "").strip()
+    if not key:
+        return []
+    url = "https://api.search.brave.com/res/v1/web/search?q=" + urllib.parse.quote(query) + f"&count={n}"
+    data = json.loads(_http_get(url, headers={"X-Subscription-Token": key}, timeout=10))
+    out = []
+    for item in (data.get("web", {}).get("results") or [])[:n]:
+        out.append({"title": item.get("title"), "snippet": item.get("description", "")[:500], "url": item.get("url")})
+    return out
+
+
+def _serpapi_search(query: str, n: int) -> list:
+    key = (os.environ.get("SERPAPI_API_KEY") or "").strip()
+    if not key:
+        return []
+    url = "https://serpapi.com/search.json?engine=google&q=" + urllib.parse.quote(query) + "&api_key=" + urllib.parse.quote(key) + f"&num={n}"
+    data = json.loads(_http_get(url, timeout=10))
+    out = []
+    for item in (data.get("organic_results") or [])[:n]:
+        out.append({"title": item.get("title"), "snippet": (item.get("snippet") or "")[:500], "url": item.get("link")})
+    for item in (data.get("news_results") or [])[:max(0, n - len(out))]:
+        out.append({"title": item.get("title"), "snippet": (item.get("snippet") or "")[:500], "url": item.get("link")})
+    return out
 
 
 def _google_cse_search(query: str, n: int) -> list:
@@ -2570,16 +2620,46 @@ def _mojeek_search(query: str, n: int) -> list:
     return out
 
 
+def _wikipedia_search(query: str, n: int) -> list:
+    # Wikipedia OpenSearch API — miễn phí, chịu crawl tốt trên Render.
+    try:
+        url = ("https://vi.wikipedia.org/w/api.php?action=opensearch&format=json&limit="
+               + str(min(n + 2, 10)) + "&search=" + urllib.parse.quote(query))
+        data = json.loads(_http_get(url, timeout=10))
+        titles, descs, links = data[1], data[2], data[3]
+        out = []
+        for t, d, link in zip(titles, descs, links):
+            out.append({"title": str(t), "snippet": str(d)[:500], "url": str(link)})
+            if len(out) >= n:
+                break
+        return [
+            # Ưu tiên title khớp query, để wikipedia fallback có nghĩa.
+            r for r in sorted(out, key=lambda r: (query.lower() not in r["title"].lower(),))
+        ][:n]
+    except Exception:
+        return []
+
+
 def _web_search(query: str, n: int = 5) -> list:
     n = max(1, min(n, 10))
-    try:
-        res = _google_cse_search(query, n)
-        if res:
-            return res
-    except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"[web] Google CSE failed: {e}\n")
     errors = []
-    for fn in (_duckduckgo_lite_search, _duckduckgo_html_search, _mojeek_search):
+    # 1) Các API chính thức có free tier — dùng key nào có.
+    for name, fn in (
+        ("tavily", _tavily_search),
+        ("brave", _brave_search),
+        ("google_cse", _google_cse_search),
+        ("serpapi", _serpapi_search),
+    ):
+        try:
+            res = fn(query, n)
+            if res:
+                sys.stderr.write(f"[web] search '{query}' via {name} -> {len(res)} ket qua\n")
+                return res
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{name}: {e}")
+            sys.stderr.write(f"[web] {name} failed: {e}\n")
+    # 2) Fallback scrape/HTML — dễ timeout trên Render nhưng vẫn thử.
+    for fn in (_duckduckgo_lite_search, _duckduckgo_html_search, _mojeek_search, _wikipedia_search):
         try:
             res = fn(query, n)
             if res:
@@ -2588,7 +2668,7 @@ def _web_search(query: str, n: int = 5) -> list:
         except Exception as e:  # noqa: BLE001
             errors.append(f"{fn.__name__}: {e}")
             sys.stderr.write(f"[web] {fn.__name__} failed: {e}\n")
-    sys.stderr.write("[web] no fallback returned results: " + " | ".join(errors) + "\n")
+    sys.stderr.write("[web] no provider returned results: " + " | ".join(errors) + "\n")
     return []
 
 

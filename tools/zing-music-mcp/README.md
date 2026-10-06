@@ -53,8 +53,11 @@ trực tiếp (hành vi cũ, giảm cấp).
 | `YTDLP_SOURCES` | Thứ tự nguồn nhạc, cách nhau `,`. Mặc định `soundcloud,youtube` — **SoundCloud là nguồn chính** |
 | `YTDLP_RESOLVE_CANDIDATES` | Số ứng viên mỗi nguồn thử thêm khi ứng viên đầu hỏng (mặc định `2`) |
 | `YTDLP_SOURCE_COOLDOWN` | Giây bỏ qua nguồn vừa gặp bot-check (mặc định `900`). `0` = tắt |
-| `GOOGLE_CSE_API_KEY` | API key Google Custom Search. Để trống thì web_search dùng DuckDuckGo |
+| `GOOGLE_CSE_API_KEY` | API key Google Custom Search (100 lượt/ngày). Để trống thì bỏ qua |
 | `GOOGLE_CSE_CX` | Engine ID (CX) của Google Programmable Search Engine |
+| `TAVILY_API_KEY` | Key Tavily Search API (miễn phí 1000 credits/tháng, khuyên dùng trên Render — IP datacenter scrape HTML hay timeout). Lấy tại https://app.tavily.com |
+| `BRAVE_API_KEY` | Key Brave Search API (free tier). Lấy tại https://brave.com/search/api/ |
+| `SERPAPI_API_KEY` | Key SerpAPI (100 searches/tháng free). Lấy tại https://serpapi.com |
 
 ### Nguồn nhạc: SoundCloud (chính) + YouTube (dự phòng) — tự động chuyển
 
