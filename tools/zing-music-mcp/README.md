@@ -17,7 +17,7 @@ trước đây). Robot chỉ nhận 1 URL stream duy nhất và tự stream qua 
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
 | `search_radio` | `keyword` (tên / quốc gia / chủ đề) | Tối đa 8 trạm: `name`, `country`, `tags`, `bitrate`, `codec`, `hls`, `url` (mọi nguồn MP3/AAC/HLS đều nhận — server transcode) |
 | `get_radio_url` | `name` (tên trạm) | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/radio/<id>.mp3"}` — radio là stream liên tục. **Lưu ý: lúc phát nhạc/radio thì micro bị tắt theo thiết kế firmware** (`music_playing_` trong `audio_service.cc` tắt codec input để wake-word không cắt ngang) — không gọi tiếp bằng giọng được; muốn đổi bài/dừng thì **nhấn nút wakeup** trên robot (board gọi `MusicPlayer::Stop()`) rồi nói tiếp |
-| `web_search` | `keyword`, `max_results` (mặc định 5) | Tìm web miễn phí: ưu tiên **Google Custom Search JSON API** (100 lượt/ngày, cần `GOOGLE_CSE_API_KEY`+`GOOGLE_CSE_CX`), không cấu hình thì fallback **DuckDuckGo HTML** (không cần key). Trả `title`, `snippet`, `url` |
+| `web_search` | `keyword`, `max_results` (mặc định 5) | Trả JSON `{"answer", "results"}`. Khi dùng Tavily sẽ có `answer` tổng hợp sẵn (search_depth=advanced, include_answer) — đọc RA LOA NGAY các câu như giá vàng/tỷ giá; `results` là nguồn `{title,snippet,url}` để tham chiếu/mở chi tiết. Không có Tavily thì fallback Brave/Google CSE/SerpAPI/scrape |
 | `web_open` | `url`, `max_chars` (mặc định 3000) | Mở 1 URL, bóc HTML, trả text để LLM tóm tắt/đọc chi tiết (giá vàng, tin tức, bài viết…) |
 | `/radio/<id>.mp3` | route FastAPI | Stream MP3 sống (`StreamingResponse` vô hạn): primer MP3 im ≤2.5s → audio radio transcode về 24 kHz mono (qua DSP `AUDIO_FILTERS`); **luôn 200, bỏ qua `Range`** (radio không có byte offset để resume) |
 
@@ -55,7 +55,7 @@ trực tiếp (hành vi cũ, giảm cấp).
 | `YTDLP_SOURCE_COOLDOWN` | Giây bỏ qua nguồn vừa gặp bot-check (mặc định `900`). `0` = tắt |
 | `GOOGLE_CSE_API_KEY` | API key Google Custom Search (100 lượt/ngày). Để trống thì bỏ qua |
 | `GOOGLE_CSE_CX` | Engine ID (CX) của Google Programmable Search Engine |
-| `TAVILY_API_KEY` | Key Tavily Search API (miễn phí 1000 credits/tháng, khuyên dùng trên Render — IP datacenter scrape HTML hay timeout). Lấy tại https://app.tavily.com |
+| `TAVILY_API_KEY` | Key Tavily Search API (miễn phí 1000 credits/tháng, khuyên dùng trên Render — IP datacenter scrape HTML hay timeout). Gọi ở chế độ `search_depth=advanced` + `include_answer=True` nên `web_search` trả luôn `answer` để robot đọc ngay. Lấy tại https://app.tavily.com |
 | `BRAVE_API_KEY` | Key Brave Search API (free tier). Lấy tại https://brave.com/search/api/ |
 | `SERPAPI_API_KEY` | Key SerpAPI (100 searches/tháng free). Lấy tại https://serpapi.com |
 

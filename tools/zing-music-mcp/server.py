@@ -2497,16 +2497,71 @@ def _strip_html(text: str) -> str:
     return text
 
 
-def _tavily_search(query: str, n: int) -> list:
+def _tavily_search(query: str, n: int) -> dict:
+    """Tavily advanced + include_answer: trả về {results, answer}.
+    answer = câu trả lời ngắn Tavily tự tổng hợp, robot đọc ra loa ngay.
+    results = các nguồn để LLM có thể tham chiếu/mở chi tiết."""
     key = (os.environ.get("TAVILY_API_KEY") or "").strip()
     if not key:
-        return []
-    body = {"api_key": key, "query": query, "max_results": n, "include_answer": False}
-    resp = _http_post_json("https://api.tavily.com/search", body, timeout=10)
+        return {"results": [], "answer": ""}
+    body = {
+        "api_key": key,
+        "query": query,
+        "max_results": n,
+        "search_depth": "advanced",
+        "include_answer": True,
+        "topic": "general",
+    }
+    resp = _http_post_json("https://api.tavily.com/search", body, timeout=15)
     out = []
     for item in (resp.get("results") or [])[:n]:
         out.append({"title": item.get("title"), "snippet": item.get("content", "")[:500], "url": item.get("url")})
-    return out
+    return {"results": out, "answer": (resp.get("answer") or "").strip()}
+
+
+def _web_search(query: str, n: int = 5) -> dict:
+    """Trả về {results, answer}. answer là câu trả lời ngắn gọn (Tavily
+    include_answer) — robot có thể đọc trực tiếp. results dùng cho chi tiết."""
+    n = max(1, min(n, 10))
+    errors = []
+    # 1) Tavily — cho cả answer lẫn results (ưu tiên nhất).
+    try:
+        res = _tavily_search(query, n)
+        if res["results"] or res["answer"]:
+            sys.stderr.write(
+                f"[web] search '{query}' via tavily -> {len(res['results'])} ket qua, "
+                f"answer={bool(res['answer'])}\n"
+            )
+            return res
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"tavily: {e}")
+        sys.stderr.write(f"[web] tavily failed: {e}\n")
+    # 2) Các API chính thức khác — fallback chỉ trả results.
+    for name, fn in (
+        ("brave", _brave_search),
+        ("google_cse", _google_cse_search),
+        ("serpapi", _serpapi_search),
+    ):
+        try:
+            res = fn(query, n)
+            if res:
+                sys.stderr.write(f"[web] search '{query}' via {name} -> {len(res)} ket qua\n")
+                return {"results": res, "answer": ""}
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{name}: {e}")
+            sys.stderr.write(f"[web] {name} failed: {e}\n")
+    # 3) Fallback scrape/HTML — dễ timeout trên Render nhưng vẫn thử.
+    for fn in (_duckduckgo_lite_search, _duckduckgo_html_search, _mojeek_search, _wikipedia_search):
+        try:
+            res = fn(query, n)
+            if res:
+                return {"results": res, "answer": ""}
+            errors.append(fn.__name__ + ": empty")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{fn.__name__}: {e}")
+            sys.stderr.write(f"[web] {fn.__name__} failed: {e}\n")
+    sys.stderr.write("[web] no provider returned results: " + " | ".join(errors) + "\n")
+    return {"results": [], "answer": ""}
 
 
 def _brave_search(query: str, n: int) -> list:
@@ -2640,38 +2695,6 @@ def _wikipedia_search(query: str, n: int) -> list:
         return []
 
 
-def _web_search(query: str, n: int = 5) -> list:
-    n = max(1, min(n, 10))
-    errors = []
-    # 1) Các API chính thức có free tier — dùng key nào có.
-    for name, fn in (
-        ("tavily", _tavily_search),
-        ("brave", _brave_search),
-        ("google_cse", _google_cse_search),
-        ("serpapi", _serpapi_search),
-    ):
-        try:
-            res = fn(query, n)
-            if res:
-                sys.stderr.write(f"[web] search '{query}' via {name} -> {len(res)} ket qua\n")
-                return res
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{name}: {e}")
-            sys.stderr.write(f"[web] {name} failed: {e}\n")
-    # 2) Fallback scrape/HTML — dễ timeout trên Render nhưng vẫn thử.
-    for fn in (_duckduckgo_lite_search, _duckduckgo_html_search, _mojeek_search, _wikipedia_search):
-        try:
-            res = fn(query, n)
-            if res:
-                return res
-            errors.append(fn.__name__ + ": empty")
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{fn.__name__}: {e}")
-            sys.stderr.write(f"[web] {fn.__name__} failed: {e}\n")
-    sys.stderr.write("[web] no provider returned results: " + " | ".join(errors) + "\n")
-    return []
-
-
 def _web_open(url: str, max_chars: int = 3000) -> str:
     try:
         html = _http_get(url, timeout=20)
@@ -2761,14 +2784,19 @@ def get_radio_url(name: str) -> str:
 
 @mcp.tool()
 def web_search(keyword: str, max_results: int = 5) -> str:
-    """Tìm kiếm web trả về tối đa max_results kết quả (title, snippet, url).
-    Ưu tiên Google Custom Search API miễn phí (100 lượt/ngày) nếu có cấu hình
-    GOOGLE_CSE_API_KEY/CX, nếu không sẽ dùng DuckDuckGo HTML không cần key.
-    Dùng web_open để đọc chi tiết 1 URL."""
+    """Tìm kiếm web: trả JSON {"answer", "results"}.
+    - answer: câu trả lời ngắn Tavily tự tổng hợp (search_depth=advanced,
+      include_answer) — đọc RA LOA NGAY cho câu hỏi như 'giá vàng hôm nay',
+      'tỷ giá', 'thời tiết' mà không cần mở thêm trang nào.
+    - results: tối đa max_results nguồn {title, snippet, url} để tham chiếu
+      hoặc dùng web_open đọc chi tiết khi cần.
+    Fallback: Brave → Google CSE → SerpAPI → scrape/HTML nếu không có Tavily."""
     res = _web_search(keyword, max_results)
-    sys.stderr.write(f"[web] search '{keyword}' -> {len(res)} ket qua\n")
+    items = res["results"] if isinstance(res, dict) else res
+    ans = res.get("answer", "") if isinstance(res, dict) else ""
+    sys.stderr.write(f"[web] search '{keyword}' -> {len(items)} ket qua, answer={bool(ans)}\n")
     sys.stderr.flush()
-    return json.dumps({"results": res}, ensure_ascii=False)
+    return json.dumps({"answer": ans, "results": items}, ensure_ascii=False)
 
 
 @mcp.tool()
