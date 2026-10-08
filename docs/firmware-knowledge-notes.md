@@ -51,6 +51,51 @@
   kênh khác. (Code `Application::SendRobotAlert` + `MotorController::SetWakeNotifier`
   vẫn giữ, đã tắt gọi trong `compact_wifi_board.cc`, ghi chú lý do tại chỗ.)
 
+## 2.3. Gửi thông điệp từ nút bấm, không thu mic (đã khảo sát)
+
+- Firmware đã có API `Protocol::SendAudio(std::unique_ptr<AudioStreamPacket>)` để
+  gửi các packet audio; giao diện này nhận payload encoded audio, dùng trong luồng
+  audio channel bình thường.
+- Ý tưởng khả thi cho câu lệnh cố định: thu âm câu nói trước, encode thành Opus
+  theo đúng sample rate/frame duration/protocol của board và server, lưu các frame
+  trên thiết bị, rồi khi bấm nút mở audio channel và gửi lần lượt các frame như
+  audio được thu trực tiếp. Đây là hướng đề xuất, **chưa triển khai hoặc thử trên
+  thiết bị/server**.
+- Không thể chỉ lưu một file `.opus` bất kỳ rồi giả định tương thích: phải kiểm
+  tra cách firmware đóng gói packet, thời điểm gửi, timestamp, sample rate, kết
+  thúc phiên nghe và cơ chế server chuyển audio sang ASR. Cần thử end-to-end với
+  backend đang dùng.
+- API `Application::SendRobotAlert(text)` hiện gửi kiểu `listen/detect/text`;
+  backend `xiaozhi.me` đã từ chối text tùy ý như ghi ở mục 2.2. Gửi audio Opus là
+  một đường khác, nhưng chưa có bằng chứng backend chấp nhận audio phát lại từ
+  flash hoặc việc đó sẽ vượt được giới hạn của backend.
+- Nút vật lý cần được nối vào callback của đúng board; nhiều board có cấu hình
+  nút và hành vi riêng. Nên gọi thay đổi application qua `Application::Schedule()`
+  nếu callback chạy ngoài main task. Chưa chọn board cụ thể nên chưa chỉnh callback.
+
+## 2.4. Thử nguồn nhạc Zing MP3 và NhacCuaTui (NCT)
+
+- Môi trường dự án dùng `yt-dlp==2026.8.19`; extractor `zingmp3` có trong bản này,
+  còn không tìm thấy extractor NhacCuaTui (`nhaccuatui`/`nct`).
+- Đã thử metadata URL Zing công khai
+  `https://zingmp3.vn/bai-hat/Lac-Troi-Son-Tung-M-TP/ZW8W7U0I.html` bằng
+  `yt-dlp --dump-single-json --skip-download`; kết quả là
+  `The song is only for VIP accounts`. Đây chỉ là thử một bài, không kiểm tra
+  bằng tài khoản VIP hoặc từ Render.
+- Extractor Zing khai báo `_GEO_COUNTRIES = ['VN']`; code extractor có hỗ trợ
+  cookies truyền vào yt-dlp, nhưng chưa thử cookie/tài khoản. Việc có tài khoản
+  chưa chứng minh rằng tìm kiếm API, quyền VIP và geo-restriction trên môi trường
+  Render đều hoạt động. Không lưu mật khẩu/cookie vào source code.
+- README và `tools/zing-music-mcp/server.py` ghi nhận search API Zing trả -403;
+  `YTDLP_SOURCES` hiện chỉ nhận `soundcloud` và `youtube`, nên Zing chưa được
+  tích hợp vào tìm kiếm/phát nhạc của MCP.
+- Trang NCT truy cập được và HTML có URL dạng `/song/<id>`, nhưng yt-dlp hiện tại
+  không nhận URL đó (`Unsupported URL`). Chưa thử API/SDK chính thức hoặc viết
+  extractor riêng. Không nên thêm NCT vào biến nguồn hiện tại khi chưa có luồng
+  lấy stream được xác minh và phù hợp điều khoản dịch vụ.
+- Chưa sửa code tích hợp nhạc cho Zing hoặc NCT; các kết quả trên là thăm dò,
+  chưa phải xác nhận quyền sử dụng nội dung/audio.
+
 ## 3. Cơ chế wake word & vòng lifecycle "thức - ngủ"
 
 - Idle: `EnableWakeWordDetection(true)` — luôn nghe wake word.
