@@ -267,6 +267,13 @@ private:
             }
             app.ToggleChatState();
         });
+        boot_button_.OnDoubleClick([this]() {
+            Application::GetInstance().Schedule([this]() {
+                if (display_ != nullptr) {
+                    display_->SetLogMode(!display_->IsLogMode());
+                }
+            });
+        });
     }
 
     MotorController& GetMotor() {

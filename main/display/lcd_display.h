@@ -33,6 +33,21 @@ protected:
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 
+    // Momentary on-screen log view (240x240 friendly).
+    lv_obj_t* log_container_ = nullptr;
+    lv_obj_t* log_title_ = nullptr;
+    lv_obj_t* log_scroll_ = nullptr;
+    lv_obj_t* log_text_ = nullptr;
+    bool log_mode_ = false;
+    lv_timer_t* log_refresh_timer_ = nullptr;
+
+    // Caller must hold the display lock (SetupUI / SetLogMode do).
+    void CreateLogView();
+    // Caller handles locking: SetLogMode holds the lock, LVGL timer is
+    // already in LVGL context and must NOT lock again.
+    void RefreshLogText();
+    static void LogRefreshTimerCb(lv_timer_t* timer);
+
     void InitializeLcdThemes();
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
@@ -54,6 +69,9 @@ public:
 
     // Set whether to hide chat messages/subtitles
     void SetHideSubtitle(bool hide);
+
+    virtual void SetLogMode(bool show_log) override;
+    virtual bool IsLogMode() const override { return log_mode_; }
 };
 
 // SPI LCD display

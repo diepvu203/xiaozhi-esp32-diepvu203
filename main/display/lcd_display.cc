@@ -2,6 +2,7 @@
 #include "assets/lang_config.h"
 #include "gif/lvgl_gif.h"
 #include "lvgl_theme.h"
+#include "screen_log.h"
 #include "settings.h"
 
 #include <esp_err.h>
@@ -290,6 +291,10 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 LcdDisplay::~LcdDisplay() {
+    if (log_refresh_timer_ != nullptr) {
+        lv_timer_del(log_refresh_timer_);
+        log_refresh_timer_ = nullptr;
+    }
     SetPreviewImage(nullptr);
 
     // Clean up GIF controller
@@ -1344,6 +1349,125 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
             if (text != nullptr && text[0] != '\0') {
                 lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
             }
+        }
+    }
+}
+
+void LcdDisplay::CreateLogView() {
+    if (log_container_ != nullptr) {
+        return;
+    }
+    LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    if (lvgl_theme == nullptr) {
+        return;
+    }
+    auto text_font = lvgl_theme->text_font()->font();
+
+    auto screen = lv_screen_active();
+    log_container_ = lv_obj_create(screen);
+    lv_obj_set_size(log_container_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(log_container_, 0, 0);
+    lv_obj_set_style_radius(log_container_, 0, 0);
+    lv_obj_set_style_pad_all(log_container_, 2, 0);
+    lv_obj_set_style_border_width(log_container_, 0, 0);
+    lv_obj_set_style_bg_color(log_container_, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(log_container_, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(log_container_, LV_SCROLLBAR_MODE_OFF);
+
+    log_title_ = lv_label_create(log_container_);
+    lv_label_set_text(log_title_, "LOG (2x-click BOOT)");
+    lv_obj_set_style_text_color(log_title_, lv_color_hex(0x00FF00), 0);
+    lv_obj_set_style_text_font(log_title_, text_font, 0);
+    lv_obj_set_width(log_title_, LV_HOR_RES - 8);
+    lv_obj_set_pos(log_title_, 4, 2);
+
+    log_scroll_ = lv_obj_create(log_container_);
+    lv_obj_set_size(log_scroll_, LV_HOR_RES - 8, LV_VER_RES - 26);
+    lv_obj_set_pos(log_scroll_, 4, 22);
+    lv_obj_set_style_radius(log_scroll_, 0, 0);
+    lv_obj_set_style_pad_all(log_scroll_, 2, 0);
+    lv_obj_set_style_border_width(log_scroll_, 0, 0);
+    lv_obj_set_style_bg_color(log_scroll_, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(log_scroll_, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(log_scroll_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scroll_dir(log_scroll_, LV_DIR_VER);
+
+    log_text_ = lv_label_create(log_scroll_);
+    lv_label_set_long_mode(log_text_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(log_text_, LV_HOR_RES - 16);
+    lv_obj_set_style_text_color(log_text_, lv_color_white(), 0);
+    lv_obj_set_style_text_font(log_text_, text_font, 0);
+    lv_label_set_text(log_text_, "...");
+
+    lv_obj_add_flag(log_container_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(log_container_);
+}
+
+void LcdDisplay::RefreshLogText() {
+    if (!log_mode_ || log_text_ == nullptr || log_scroll_ == nullptr) {
+        return;
+    }
+    auto& store = ScreenLogStore::GetInstance();
+    if (!store.HasUpdate()) {
+        return;
+    }
+    store.ClearUpdate();
+    std::string txt = store.GetText();
+    if (txt.empty()) {
+        return;
+    }
+    // Keep label bounded for LVGL: show tail only.
+    if (txt.length() > 5000) {
+        txt = txt.substr(txt.length() - 5000);
+        size_t nl = txt.find('\n');
+        if (nl != std::string::npos) {
+            txt = txt.substr(nl + 1);
+        }
+    }
+    lv_label_set_text(log_text_, txt.c_str());
+    lv_obj_scroll_to_y(log_scroll_, LV_COORD_MAX, LV_ANIM_OFF);
+    lv_obj_update_layout(log_scroll_);
+}
+
+void LcdDisplay::LogRefreshTimerCb(lv_timer_t* timer) {
+    auto* self = static_cast<LcdDisplay*>(lv_timer_get_user_data(timer));
+    if (self == nullptr) {
+        return;
+    }
+    // Runs inside the LVGL task: do not take the display lock again.
+    self->RefreshLogText();
+}
+
+void LcdDisplay::SetLogMode(bool show_log) {
+    DisplayLockGuard lock(this);
+    if (show_log == log_mode_ && log_container_ != nullptr) {
+        return;
+    }
+    if (show_log && log_container_ == nullptr) {
+        CreateLogView();
+        if (log_container_ == nullptr) {
+            return;
+        }
+    }
+    log_mode_ = show_log;
+    if (show_log) {
+        auto& store = ScreenLogStore::GetInstance();
+        store.Install();
+        store.ClearUpdate();
+        lv_label_set_text(log_text_, store.GetText().c_str());
+        lv_obj_remove_flag(log_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(log_container_);
+        if (log_refresh_timer_ == nullptr) {
+            log_refresh_timer_ = lv_timer_create(LogRefreshTimerCb, 500, this);
+        } else {
+            lv_timer_resume(log_refresh_timer_);
+        }
+    } else {
+        if (log_container_ != nullptr) {
+            lv_obj_add_flag(log_container_, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (log_refresh_timer_ != nullptr) {
+            lv_timer_pause(log_refresh_timer_);
         }
     }
 }

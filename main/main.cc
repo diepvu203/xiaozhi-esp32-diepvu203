@@ -9,10 +9,16 @@
 
 #include "application.h"
 
+#include "display/screen_log.h"
+
 #define TAG "main"
 
 extern "C" void app_main(void)
 {
+    // On-screen log capture temporarily disabled to restore factory boot.
+    // ScreenLogStore::GetInstance().Configure(50, 110);
+    // ScreenLogStore::GetInstance().Install();
+
     // Initialize NVS flash for WiFi configuration
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

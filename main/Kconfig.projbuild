@@ -1151,7 +1151,7 @@ menu "GPIO Voice Trigger"
 
     config VOICE_TRIGGER_TEXT
         string "Announcement text"
-        default "Co khach den, xin vui long doi mot chut"
+        default "địt cụ chúng mài"
         depends on VOICE_TRIGGER_ENABLED
         help
             Text spoken when the GPIO triggers. Keep ASCII here;
