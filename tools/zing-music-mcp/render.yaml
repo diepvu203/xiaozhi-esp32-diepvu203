@@ -55,3 +55,8 @@ services:
         value: "160k"
       - key: AUDIO_PRESET
         value: "speaker"
+      # TTS tieng Viet cho GPIO trigger tren robot (GET /tts?text=...).
+      # vi-VN-HoaiMyNeural = giong nu mien Nam; doi thanh
+      # vi-VN-NamMinhNeural neu muon giong nam mien Nam.
+      - key: TTS_VOICE
+        value: "vi-VN-HoaiMyNeural"

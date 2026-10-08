@@ -13,7 +13,14 @@
 #include "tof_sensor.h"
 
 #include <esp_log.h>
+#include <driver/gpio.h>
 #include <driver/i2c_master.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include <cctype>
+#include <string>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -61,6 +68,119 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 #endif
  
 #define TAG "CompactWifiBoardLCD"
+
+#if defined(CONFIG_VOICE_TRIGGER_ENABLED)
+// GPIO-triggered voice announcement (see Kconfig "GPIO Voice Trigger").
+// Poll the pin; on a rising edge build <SERVER>/tts?text=<text> and hand it to
+// the existing MusicPlayer. No LLM/session involvement at all.
+//
+// Runs in its own FreeRTOS task: the GPIO cannot be serviced from the main
+// event loop, and Application::Schedule() marshals the playback mutation back
+// onto the main task (AGENTS.md rule: callbacks outside the main task must
+// schedule).
+namespace {
+
+// Rising-edge detection over a polled level. Rebounds (button/relay chatter)
+// are filtered by requiring the level to stay high for kStableMs.
+constexpr int kPollIntervalMs = 50;
+constexpr int kStableMs = 200;
+constexpr int kTaskStackBytes = 3072;
+constexpr int kTaskPriority = 3;
+
+std::string UrlEncode(const std::string& in) {
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size() * 3);
+    for (unsigned char c : in) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += kHex[c >> 4];
+            out += kHex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+class VoiceTrigger {
+public:
+    void Start() {
+        gpio_config_t io_conf = {};
+        io_conf.pin_bit_mask = 1ULL << CONFIG_VOICE_TRIGGER_GPIO;
+        io_conf.mode = GPIO_MODE_INPUT;
+        // Pull-down so a floating pin (nothing connected) reads as inactive
+        // and does not fire the announcement on boot.
+        io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+        BaseType_t ok = xTaskCreate(
+            [](void* arg) {
+                static_cast<VoiceTrigger*>(arg)->Run();
+                vTaskDelete(nullptr);
+            },
+            "voice_trigger", kTaskStackBytes, this, kTaskPriority, nullptr);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create voice trigger task");
+        } else {
+            ESP_LOGI(TAG, "Voice trigger on GPIO%d (server %s)",
+                     CONFIG_VOICE_TRIGGER_GPIO, CONFIG_VOICE_TRIGGER_SERVER_URL);
+        }
+    }
+
+private:
+    void Run() {
+        const gpio_num_t pin = static_cast<gpio_num_t>(CONFIG_VOICE_TRIGGER_GPIO);
+        bool high = gpio_get_level(pin) != 0;  // don't fire on boot if held high
+        int64_t high_since_us = high ? esp_timer_get_time() : 0;
+        int64_t last_fired_us = 0;
+        const int64_t cooldown_us =
+            static_cast<int64_t>(CONFIG_VOICE_TRIGGER_COOLDOWN_S) * 1000 * 1000;
+
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(kPollIntervalMs));
+            const bool level = gpio_get_level(pin) != 0;
+            const int64_t now = esp_timer_get_time();
+            if (level != high) {
+                high = level;
+                high_since_us = level ? now : 0;
+                continue;
+            }
+            if (!high) {
+                continue;
+            }
+            if (now - high_since_us < kStableMs * 1000) {
+                continue;  // still bouncing
+            }
+            if (last_fired_us != 0 && now - last_fired_us < cooldown_us) {
+                continue;  // held high, or repeated triggers too fast
+            }
+            last_fired_us = now;
+            ESP_LOGI(TAG, "Voice trigger fired");
+            ScheduleAnnouncement();
+        }
+    }
+
+    static void ScheduleAnnouncement() {
+        std::string url = std::string(CONFIG_VOICE_TRIGGER_SERVER_URL) +
+                          "/tts?text=" + UrlEncode(CONFIG_VOICE_TRIGGER_TEXT);
+        Application::GetInstance().Schedule([url]() {
+            auto& app = Application::GetInstance();
+            // Silence whatever is playing: a button press must not be ignored
+            // just because music or a reply is in flight.
+            MusicPlayer::GetInstance().Stop();
+            if (app.GetDeviceState() == kDeviceStateSpeaking) {
+                app.AbortSpeaking(kAbortReasonNone);
+            }
+            if (!MusicPlayer::GetInstance().Play(url)) {
+                ESP_LOGW(TAG, "Voice trigger: Play() rejected");
+            }
+        });
+    }
+};
+
+}  // namespace
+#endif  // CONFIG_VOICE_TRIGGER_ENABLED
 
 class CompactWifiBoardLCD : public WifiBoard {
 private:
@@ -201,6 +321,15 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeTools();
+#if defined(CONFIG_VOICE_TRIGGER_ENABLED)
+        {
+            // Voice announcement does not need WiFi at boot: the task only
+            // polls a pin. If WiFi is down when the pin fires, MusicPlayer
+            // retries/connect-fails like a normal stream (no crash).
+            static VoiceTrigger voice_trigger;
+            voice_trigger.Start();
+        }
+#endif
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }

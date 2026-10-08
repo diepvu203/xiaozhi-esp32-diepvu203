@@ -1123,4 +1123,47 @@ menu "TAIJIPAI_S3_CONFIG"
         启动双声道
 endmenu
 
+menu "GPIO Voice Trigger"
+    config VOICE_TRIGGER_ENABLED
+        bool "Enable GPIO voice announcement"
+        default n
+        help
+            When the trigger GPIO goes high, stop any current playback and
+            play a TTS announcement from the music server via MusicPlayer,
+            bypassing the LLM session entirely.
+
+    config VOICE_TRIGGER_GPIO
+        int "Trigger GPIO number"
+        default 9
+        depends on VOICE_TRIGGER_ENABLED
+        help
+            GPIO that triggers the announcement on rising edge.
+            Default 9 is free on bread-compact-wifi-lcd.
+
+    config VOICE_TRIGGER_SERVER_URL
+        string "Music server base URL"
+        default "https://xiaozhi-music.onrender.com"
+        depends on VOICE_TRIGGER_ENABLED
+        help
+            Base URL of the music/TTS server (the same Render service).
+            The device plays <URL>/tts?text=<announcement text>.
+            MUST be updated to the real Render URL before flashing.
+
+    config VOICE_TRIGGER_TEXT
+        string "Announcement text"
+        default "Co khach den, xin vui long doi mot chut"
+        depends on VOICE_TRIGGER_ENABLED
+        help
+            Text spoken when the GPIO triggers. Keep ASCII here;
+            edit withtones via menuconfig after the first build.
+
+    config VOICE_TRIGGER_COOLDOWN_S
+        int "Retrigger cooldown (seconds)"
+        default 10
+        depends on VOICE_TRIGGER_ENABLED
+        help
+            Minimum seconds between two announcements.
+endmenu
+
+
 endmenu

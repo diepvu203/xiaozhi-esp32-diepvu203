@@ -2308,6 +2308,100 @@ def _radio_body(key: str, url: str):
             pass
 
 
+# ---------------------------------------------------------------------------
+# /tts: Text-to-Speech tieng Viet cho GPIO trigger tren robot.
+# GET /tts?text=... [&voice=...] -> MP3 24 kHz mono (cung chuan /stream).
+# edge-tts (Microsoft Neural) synthesis -> ffmpeg transcode (DSP speaker
+# preset + libmp3lame, giong _transcode_local) -> cache dia tts-<md5>.mp3
+# (cau da doc roi tra FileResponse ngay, co Content-Length) -> firmware
+# MusicPlayer stream nhu bai hat binh thuong, khong qua LLM.
+# ---------------------------------------------------------------------------
+TTS_VOICE = os.environ.get("TTS_VOICE", "vi-VN-HoaiMyNeural").strip() or "vi-VN-HoaiMyNeural"
+_TTS_LOCK = threading.Lock()
+
+
+def _tts_cache_path(text: str, voice: str) -> str:
+    digest = hashlib.md5(f"{voice}|{text}".encode("utf-8")).hexdigest()[:16]
+    return os.path.join(MEDIA_DIR, f"tts-{digest}.mp3")
+
+
+def _tts_synthesize(text: str, voice: str, dest: str) -> None:
+    import asyncio
+    try:
+        import edge_tts
+    except ImportError:
+        raise RuntimeError("edge-tts chua cai (them vao requirements.txt)")
+    tmp = dest + ".raw.mp3"
+    # edge-tts hay fail "NoAudioReceived" mot cach ngau nhien (ket noi
+    # websocket Microsoft bi chan/reset giua chung) — thu lai vai lan truoc
+    # khi tra loi loi ve client. Da verify: lan 1-2 fail, lan 3 ra audio.
+    # asyncio.run tao loop moi moi lan goi: an toan khi route sync chay trong
+    # threadpool cua uvicorn (ca 2 mode stdio + streamable-http).
+    async def _run():
+        await edge_tts.Communicate(text, voice).save(tmp)
+
+    last = None
+    for attempt in range(3):
+        try:
+            asyncio.run(_run())
+            last = None
+            break
+        except Exception as e:  # noqa: BLE001
+            last = e
+            sys.stderr.write(f"[tts] edge-tts attempt {attempt + 1}/3 loi: {e}\n")
+            sys.stderr.flush()
+            time.sleep(3)
+    if last is not None:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise last
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-y",
+           "-i", tmp, "-vn",
+           "-ac", AUDIO_CHANNELS, "-ar", str(AUDIO_SAMPLE_RATE)]
+    if AUDIO_FILTERS:
+        cmd += ["-af", AUDIO_FILTERS]
+    cmd += ["-codec:a", "libmp3lame", "-b:a", AUDIO_BITRATE,
+            "-f", "mp3", dest]
+    try:
+        proc = subprocess.run(cmd, timeout=120)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    if proc.returncode != 0 or _size_of(dest) < 5000:
+        raise RuntimeError(f"tts transcode loi rc={proc.returncode}")
+
+
+@stream_app.get("/tts")
+def tts(text: str = "", voice: str = ""):
+    text = (text or "").strip()[:500]
+    if not text:
+        raise HTTPException(400, "thieu ?text=")
+    voice = (voice or "").strip() or TTS_VOICE
+    if not re.match(r"^[A-Za-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural$", voice):
+        raise HTTPException(400, "voice khong hop le")
+    path = _tts_cache_path(text, voice)
+    if _size_of(path) <= 0:
+        with _TTS_LOCK:  # single-flight: 2 GPIO trigger cung luc chi synth 1 lan
+            if _size_of(path) <= 0:
+                t0 = time.time()
+                try:
+                    _tts_synthesize(text, voice, path)
+                except Exception as e:  # noqa: BLE001 - bao loi ve client
+                    sys.stderr.write(f"[tts] loi '{text[:40]}': {e}\n")
+                    sys.stderr.flush()
+                    raise HTTPException(502, f"tts failed: {e}")
+                sys.stderr.write(
+                    f"[tts] '{text[:40]}' voice={voice} {time.time() - t0:.1f}s\n")
+                sys.stderr.flush()
+    return FileResponse(
+        path, media_type="audio/mpeg",
+        headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=86400"})
+
+
 @stream_app.get("/radio/{key}.mp3")
 def radio(key: str):
     with _lock:
