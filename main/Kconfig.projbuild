@@ -1142,7 +1142,7 @@ menu "GPIO Voice Trigger"
 
     config VOICE_TRIGGER_SERVER_URL
         string "Music server base URL"
-        default "https://xiaozhi-music.onrender.com"
+        default "https://xiaozhi-music-mcp-4y75.onrender.com"
         depends on VOICE_TRIGGER_ENABLED
         help
             Base URL of the music/TTS server (the same Render service).
