@@ -509,6 +509,58 @@ def _mk_result(e: dict, source: str) -> dict:
     }
 
 
+def _search_nct(query: str, n: int = 5) -> list:
+    """Tìm bài hát trên NhacCuaTui qua ajax search API."""
+    def _do_query(q: str):
+        url = "https://www.nhaccuatui.com/ajax/search?q=" + urllib.parse.quote(q)
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        try:
+            content = urllib.request.urlopen(req, timeout=8).read().decode("utf-8", "replace")
+            data = json.loads(content).get("data", {})
+            return data.get("song", []), data.get("playlist", [])
+        except Exception as e:
+            sys.stderr.write(f"[nct] search query error '{q}': {e}\n")
+            return [], []
+
+    songs, playlists = _do_query(query)
+    if not songs and not playlists:
+        norm_q = _norm_title(query)
+        if norm_q != query.lower().strip():
+            songs, playlists = _do_query(norm_q)
+
+    out = []
+    seen_urls = set()
+    for s in songs:
+        url = s.get("url")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        singers = ", ".join(x.get("name") for x in s.get("singer", []) if x.get("name"))
+        out.append({
+            "title": s.get("name"),
+            "uploader": singers or "NhacCuaTui",
+            "duration_sec": None,
+            "source": "nhaccuatui",
+            "youtube_url": url,
+        })
+    for p in playlists:
+        url = p.get("url")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        singers = ", ".join(x.get("name") for x in p.get("singer", []) if x.get("name"))
+        out.append({
+            "title": p.get("name"),
+            "uploader": singers or "NhacCuaTui",
+            "duration_sec": None,
+            "source": "nhaccuatui",
+            "youtube_url": url,
+        })
+    return out[:n]
+
+
 def _flat_search(source: str, query: str, n: int, retries: int = 2) -> list:
     """Search phang (extract_flat, KHONG download) tren mot nguon.
     Dung chung cho search_song va cho viec xep hang candidate khi resolve.
@@ -518,6 +570,8 @@ def _flat_search(source: str, query: str, n: int, retries: int = 2) -> list:
     o do generic extractor nhan "scsearch3:..." -> tra 0 ket qua im lang.
     Co "scsearch3:" trong chinh URL thi SearchInfoExtractor bat duoc dung.
     """
+    if source in ("nhaccuatui", "nct"):
+        return _search_nct(query, n)
     target = f"{_SOURCE_SEARCH_KEY[source]}{n}:{query}"
     opts = {
         "quiet": True,
@@ -540,6 +594,8 @@ def _flat_search(source: str, query: str, n: int, retries: int = 2) -> list:
 
 
 def _search_source(source: str, query: str, n: int) -> list:
+    if source in ("nhaccuatui", "nct"):
+        return _search_nct(query, n)
     if source == "youtube":
         res = _flat_search(source, query, n)
         if res:
@@ -622,11 +678,12 @@ _SEARCH_ENOUGH_SCORE = float(os.environ.get("YTDLP_SEARCH_ENOUGH_SCORE", "0.95")
 _CAND_KEEP = 8
 
 
-def _search_all(query: str, n: int = 5) -> list:
+def _search_all(query: str, n: int = 5, sources: tuple = None) -> list:
     out, seen = [], set()
     counts = {}
     per_source = {}
-    for src in SOURCES:
+    active_sources = sources if sources else SOURCES
+    for src in active_sources:
         if _source_cooldown_active(src):
             counts[src] = "cooldown"
             continue
@@ -934,11 +991,15 @@ _CLIENT_TIERS = _parse_client_ladder(
 #   Ket qua: chi dung duoc khi biet san URL Zing + bai free + co cookies VN.
 # (Canh bao "khong ho tro zing" in o duoi, sau khi SOURCES da parse.)
 # ---------------------------------------------------------------------------
-_SOURCE_SEARCH_KEY = {"soundcloud": "scsearch", "youtube": "ytsearch"}
-# SoundCloud đứng đầu: không cần cookies/PO token, không bị bot-check theo IP
-# (đã verify end-to-end), nên là nguồn ổn định nhất. YouTube để sau làm dự
-# phòng cho bài chỉ có trên YouTube. Đổi thứ tự bằng YTDLP_SOURCES.
-_DEFAULT_SOURCES = "soundcloud,youtube"
+_SOURCE_SEARCH_KEY = {
+    "nhaccuatui": "nctsearch",
+    "soundcloud": "scsearch",
+    "youtube": "ytsearch",
+}
+# NhacCuaTui (NCT) đứng đầu: kho nhạc Việt phong phú, không bot-check, không cần
+# cookies/POT, stream MP3 trực tiếp. SoundCloud đứng thứ 2: ổn định, nhạc quốc tế/EDM/remix.
+# YouTube đứng thứ 3 làm dự phòng. Đổi thứ tự bằng YTDLP_SOURCES.
+_DEFAULT_SOURCES = "nhaccuatui,soundcloud,youtube"
 
 
 def _parse_sources(raw: str) -> tuple:
@@ -947,6 +1008,8 @@ def _parse_sources(raw: str) -> tuple:
         s = s.strip().lower()
         if not s:
             continue
+        if s == "nct":
+            s = "nhaccuatui"
         if s not in _SOURCE_SEARCH_KEY:
             sys.stderr.write(
                 f"[music] YTDLP_SOURCES: bo qua nguon '{s}' (hop le: "
@@ -1275,6 +1338,72 @@ def _resolve_youtube(title: str) -> dict:
         f"{last_err}{_hint}")
 
 
+def _resolve_nct(title: str) -> dict:
+    """NhacCuaTui: lấy stream MP3 trực tiếp từ trang web NCT.
+    Không cần cookies, không cần POT, không bị bot-check.
+    Ứng viên xếp hạng theo độ khớp tên rồi thử tuần tự."""
+    if _looks_like_url(title):
+        cands = [{"title": title, "youtube_url": title}]
+    else:
+        cands = _rank_candidates("nhaccuatui", title, RESOLVE_CANDIDATES)
+    if not cands:
+        raise RuntimeError("nhaccuatui: search không có kết quả cho tên này")
+    last_err = None
+    for cand in cands:
+        target_url = cand.get("youtube_url") or cand.get("url")
+        if not target_url:
+            continue
+        try:
+            req = urllib.request.Request(target_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
+            html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", "replace")
+            m_key = re.search(r'\.([a-zA-Z0-9]+)\.html', target_url)
+            key = m_key.group(1) if m_key else ""
+            pos = html.find(f"dataDetail:{key}") if key else -1
+            chunk = html[pos:pos + 5000] if pos != -1 else html
+            matches = re.findall(r'https://[^\"]*?\.nct\.vn/[^\"]+?\.mp3\?[^\"]+', chunk)
+            if not matches and pos != -1:
+                matches = re.findall(r'https://[^\"]*?\.nct\.vn/[^\"]+?\.mp3\?[^\"]+', html)
+            if not matches:
+                last_err = RuntimeError(f"không tìm thấy link stream trong trang {target_url}")
+                continue
+            hq = [m for m in matches if "_hq.mp3" in m]
+            direct = hq[0] if hq else matches[0]
+            direct = direct.replace('\\u002F', '/').replace('&amp;', '&')
+
+            entry = {
+                "direct_url": direct,
+                "title": cand.get("title") or title,
+                "uploader": cand.get("uploader") or "NhacCuaTui",
+                "duration": cand.get("duration_sec"),
+                "source": "nhaccuatui",
+                "client": "nct",
+                "clients_seen": ["nct"],
+                "format_id": "mp3",
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": "https://www.nhaccuatui.com/",
+                },
+                "expires": time.time() + _RESOLVE_TTL,
+            }
+            if not _probe_direct_url(entry):
+                last_err = RuntimeError("URL stream NCT không tải được (probe)")
+                continue
+
+            sys.stderr.write(
+                f"[music] nhaccuatui OK '{entry['title']}' -> {direct[:60]}...\n")
+            sys.stderr.flush()
+            return entry
+        except Exception as e:
+            last_err = e
+            sys.stderr.write(f"[music] nhaccuatui candidate that bai: {e}\n")
+            sys.stderr.flush()
+            continue
+    raise RuntimeError(
+        f"nhaccuatui: hết {len(cands)} ứng viên cho '{title}', last={last_err}")
+
+
 def _resolve_soundcloud(title: str) -> dict:
     """SoundCloud: không có client ladder, không cần cookies/POT, không bị
     bot-check theo IP. Ứng viên xếp hạng theo độ khớp tên rồi thử tuần tự.
@@ -1333,8 +1462,12 @@ def _resolve(key: str, title: str) -> dict:
             continue
         t0 = time.time()
         try:
-            entry = (_resolve_soundcloud(title) if src == "soundcloud"
-                     else _resolve_youtube(title))
+            if src in ("nhaccuatui", "nct"):
+                entry = _resolve_nct(title)
+            elif src == "soundcloud":
+                entry = _resolve_soundcloud(title)
+            else:
+                entry = _resolve_youtube(title)
         except Exception as e:  # noqa: BLE001 - thử nguồn tiếp theo
             errors.append(str(e))
             # Chỉ bot-check mới đáng đánh dấu cooldown; "không tìm thấy bài"
@@ -2799,15 +2932,54 @@ def _web_open(url: str, max_chars: int = 3000) -> str:
 
 
 @mcp.tool()
-def search_song(keyword: str) -> str:
-    """Tìm bài hát theo tên (hoặc tên + ca sĩ). Trả về tối đa 5 kết quả:
-    title, uploader, duration_sec, source, youtube_url. Dùng get_song_url để
-    lấy stream URL mp3 cho robot phát. Tìm trên TẤT CẢ nguồn đang bật
-    (mặc định SoundCloud + YouTube) nên khi YouTube bị bot-check vẫn còn
-    kết quả từ nguồn khác. Kết quả đã xếp theo độ khớp tên, nguồn chính
-    (SoundCloud) đứng trước nếu bài trùng nhau."""
-    res = _search_all(keyword, 5)
-    sys.stderr.write(f"[music] search '{keyword}' -> {len(res)} ket qua\n")
+def get_music_sources() -> str:
+    """Liệt kê các nguồn tìm kiếm nhạc mà robot hỗ trợ.
+    Gọi tool này khi người dùng hỏi: 'robot có thể tìm nhạc ở những nguồn nào',
+    'có thể phát nhạc từ đâu', 'danh sách nguồn nhạc', hoặc các câu hỏi tương tự."""
+    return json.dumps({
+        "default_priority": ["nhaccuatui", "soundcloud", "youtube"],
+        "sources": [
+            {
+                "id": "nhaccuatui",
+                "name": "Nhạc Của Tui (NCT)",
+                "description": "Kho nhạc Việt Nam (Vpop, ballad, nhạc trẻ, trữ tình) - Nguồn ưu tiên số 1"
+            },
+            {
+                "id": "soundcloud",
+                "name": "SoundCloud",
+                "description": "Kho nhạc quốc tế, EDM, remix, cover, độc lập"
+            },
+            {
+                "id": "youtube",
+                "name": "YouTube",
+                "description": "Kho âm nhạc và video toàn cầu (nguồn phụ)"
+            }
+        ]
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def search_song(keyword: str, source: str = "") -> str:
+    """Tìm bài hát theo tên (hoặc tên + ca sĩ).
+    Tham số:
+      - keyword: tên bài hát hoặc ca sĩ (bắt buộc)
+      - source: nguồn tìm kiếm mong muốn: 'nhaccuatui' (hoặc 'nct'), 'soundcloud', 'youtube'.
+        Nếu để trống, robot sẽ tự động tìm kiếm và ưu tiên Nhạc Của Tui (NCT) trước,
+        sau đó đến SoundCloud và YouTube.
+    Trả về tối đa 5 kết quả: title, uploader, duration_sec, source, youtube_url.
+    Dùng get_song_url để lấy stream URL mp3 cho robot phát."""
+    selected_sources = None
+    if source:
+        s = source.strip().lower()
+        if s in ("nhaccuatui", "nct"):
+            selected_sources = ("nhaccuatui",)
+        elif s == "soundcloud":
+            selected_sources = ("soundcloud",)
+        elif s == "youtube":
+            selected_sources = ("youtube",)
+    res = _search_all(keyword, 5, sources=selected_sources)
+    sys.stderr.write(
+        f"[music] search '{keyword}' (source={source or 'all'}) -> {len(res)} ket qua\n")
     for r in res[:3]:
         sys.stderr.write(
             f"[music]   - {r.get('title')} | {r.get('uploader')} "

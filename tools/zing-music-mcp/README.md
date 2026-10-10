@@ -13,7 +13,8 @@ trước đây). Robot chỉ nhận 1 URL stream duy nhất và tự stream qua 
 
 | Tool | Input | Output |
 |------|-------|--------|
-| `search_song` | `keyword` (tên bài / ca sĩ) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url` (xếp theo độ khớp tên, ưu tiên SoundCloud) |
+| `get_music_sources` | (không) | Liệt kê các nguồn nhạc: Nhạc Của Tui (NCT - ưu tiên 1), SoundCloud (ưu tiên 2), YouTube (dự phòng) |
+| `search_song` | `keyword`, `source` (tùy chọn) | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url`. Mặc định ưu tiên NhacCuaTui trước, sau đó đến SoundCloud và YouTube. Nếu người dùng chỉ định nguồn (nct / soundcloud / youtube), tìm theo nguồn đó |
 | `get_song_url` | `title` | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/stream/<id>.mp3"}` — không cần poll/chờ |
 | `search_radio` | `keyword` (tên / quốc gia / chủ đề) | Tối đa 8 trạm: `name`, `country`, `tags`, `bitrate`, `codec`, `hls`, `url` (mọi nguồn MP3/AAC/HLS đều nhận — server transcode) |
 | `get_radio_url` | `name` (tên trạm) | Trả NGAY `{"status":"ready","stream_url":"<PUBLIC_BASE>/radio/<id>.mp3"}` — radio là stream liên tục. **Lưu ý: lúc phát nhạc/radio thì micro bị tắt theo thiết kế firmware** (`music_playing_` trong `audio_service.cc` tắt codec input để wake-word không cắt ngang) — không gọi tiếp bằng giọng được; muốn đổi bài/dừng thì **nhấn nút wakeup** trên robot (board gọi `MusicPlayer::Stop()`) rồi nói tiếp |
@@ -347,9 +348,17 @@ có thể bị giới hạn tuổi / không khả dụng — bảo robot thử b
 ## Cấu hình prompt trên xiaozhi.me (Vai trò)
 
 ```
-Khi tôi xin phát nhạc hoặc tìm nhạc: nếu chưa rõ bài nào thì gọi
-search_song để liệt kê và hỏi tôi chọn; khi đã chốt bài thì gọi
-get_song_url (trả về ngay) rồi gọi self.music.play với stream_url.
+Khi tôi hỏi bạn có thể tìm nhạc ở những nguồn nào hoặc hỏi danh sách nguồn:
+hãy liệt kê 3 nguồn nhạc:
+1. Nhạc Của Tui (NCT): nguồn chính ưu tiên số 1 cho nhạc Việt (Vpop, ballad, nhạc trẻ).
+2. SoundCloud: nguồn số 2 cho nhạc quốc tế, EDM, remix, cover.
+3. YouTube: nguồn phụ dự phòng.
+(Bạn có thể gọi tool get_music_sources để lấy danh sách nguồn).
+
+Khi tôi xin phát nhạc hoặc tìm nhạc:
+- Nếu tôi chỉ định nguồn cụ thể (vd: "tìm trên soundcloud", "tìm trên nhaccuatui"): gọi search_song với tham số source tương ứng ("soundcloud" hoặc "nhaccuatui").
+- Nếu tôi chỉ nói tìm bài hát chung chung: gọi search_song (để trống source), hệ thống sẽ tự động ưu tiên NhacCuaTui trước, sau đó đến SoundCloud.
+- Nếu chưa rõ bài nào thì gọi search_song để liệt kê và hỏi tôi chọn; khi đã chốt bài thì gọi get_song_url (trả về ngay) rồi gọi self.music.play với stream_url.
 Nếu lỗi thì báo tôi. Không tự phát nhạc khác khi tôi không yêu cầu.
 
 Khi tôi xin mở radio/phát đài: gọi search_radio liệt kê trạm MP3,

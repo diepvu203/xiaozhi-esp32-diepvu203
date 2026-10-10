@@ -33,7 +33,8 @@ MusicPlayer: HTTP chunk → decode esp_audio_dec → push AudioService queue →
 
 | Tool | Nguồn | Mô tả |
 |------|-------|-------|
-| `search_song(keyword)` | server | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url` |
+| `get_music_sources` | server | Liệt kê các nguồn nhạc: Nhạc Của Tui (NCT - ưu tiên 1), SoundCloud (ưu tiên 2), YouTube (dự phòng) |
+| `search_song(keyword, source)` | server | Tối đa 5 kết quả: `title`, `uploader`, `duration_sec`, `source`, `youtube_url`. Ưu tiên NhacCuaTui trước, rồi đến SoundCloud/YouTube. Hỗ trợ chọn nguồn qua `source` |
 | `get_song_url(title)` | server | Trả NGAY `status: ready` + `stream_url` — không cần poll |
 | `self.music.play(url, name)` | firmware | Phát nhạc từ stream URL (throw nếu đang phát) |
 | `self.music.stop` | firmware | Dừng nhạc đang phát |
