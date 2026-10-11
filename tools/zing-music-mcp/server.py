@@ -1046,7 +1046,7 @@ RESOLVE_CANDIDATES = max(1, int(os.environ.get("YTDLP_RESOLVE_CANDIDATES", "2"))
 # request sau. Ly do: YouTube that bai ton mot ladder 4 tier ~10-20s moi bai;
 # khi IP da bi chan thi doi lan tiep cung that. Source nao giu duoc thi thu
 # lai; dat 0 de tat cooldown (moi request deu thu lai).
-SOURCE_COOLDOWN = max(0, int(os.environ.get("YTDLP_SOURCE_COOLDOWN", "900")))
+SOURCE_COOLDOWN = max(0, int(os.environ.get("YTDLP_SOURCE_COOLDOWN", "120")))
 
 # Prefetch: search vừa tìm ra bài khớp tuyệt đối thì tải luôn trong lúc agent
 # còn đang suy nghĩ/chờ -> lúc robot phát, file đã có sẵn, độ trễ về 0.
@@ -1473,6 +1473,30 @@ def _resolve(key: str, title: str) -> dict:
         cached = _resolved.get(key)
     if cached and cached.get("expires", 0) > time.time():
         return cached
+
+    # Nếu title là URL trực tiếp, routing thẳng tới đúng nguồn đó (không thử chéo nguồn khác)
+    if _looks_like_url(title):
+        t_low = title.lower()
+        t0 = time.time()
+        if "youtube.com" in t_low or "youtu.be" in t_low:
+            entry = _resolve_youtube(title)
+            entry["source"] = "youtube"
+        elif "soundcloud.com" in t_low:
+            entry = _resolve_soundcloud(title)
+            entry["source"] = "soundcloud"
+        elif "nhaccuatui.com" in t_low or "nct.vn" in t_low:
+            entry = _resolve_nct(title)
+            entry["source"] = "nhaccuatui"
+        else:
+            entry = _resolve_youtube(title)
+            entry["source"] = "youtube"
+        with _lock:
+            _resolved[key] = entry
+        sys.stderr.write(
+            f"[music] resolve direct URL OK ({entry['source']}) sau {time.time() - t0:.1f}s\n")
+        sys.stderr.flush()
+        return entry
+
     errors = []
     for idx, src in enumerate(SOURCES):
         if _source_cooldown_active(src):
@@ -1487,13 +1511,12 @@ def _resolve(key: str, title: str) -> dict:
             else:
                 entry = _resolve_youtube(title)
         except Exception as e:  # noqa: BLE001 - thử nguồn tiếp theo
-            errors.append(str(e))
-            # Chỉ bot-check mới đáng đánh dấu cooldown; "không tìm thấy bài"
-            # là chuyện của bài đó, không phải nguồn chết.
-            if _is_client_level_err(e):
-                _mark_source_failed(src)
+            errors.append(f"{src}: {e}")
+            # CHỈ bot-check của YouTube mới đáng đánh dấu cooldown; SoundCloud và NCT không bao giờ bị bot-check này
+            if src == "youtube" and _is_client_level_err(e):
+                _mark_source_failed("youtube")
             sys.stderr.write(
-                f"[music] nguon '{src}' that bai sau {time.time() - t0:.0f}s\n")
+                f"[music] nguon '{src}' that bai sau {time.time() - t0:.0f}s: {e}\n")
             sys.stderr.flush()
             continue
         entry["source"] = src
