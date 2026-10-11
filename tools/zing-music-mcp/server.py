@@ -707,6 +707,9 @@ def _search_all(query: str, n: int = 5, sources: tuple = None) -> list:
         if kept and kept[0][0] >= _SEARCH_ENOUGH_SCORE:
             counts["early_exit"] = f"{kept[0][0]:.2f}"
             break
+        if len(out) >= n:
+            counts["early_exit"] = f"enough({len(out)})"
+            break
     _cache_candidates(query, per_source)
     sys.stderr.write(
         "[music] search " + ", ".join(
@@ -736,8 +739,14 @@ def _cache_candidates(query: str, per_source: dict) -> None:
     if not merged:
         return
     with _lock:
+        now = time.time()
         _candidates[query.strip().lower()] = {
-            "ts": time.time(), "list": merged[:_CAND_MAX]}
+            "ts": now, "list": merged[:_CAND_MAX]}
+        # Lưu cache theo từng title để get_song_url(title_của_kết_quả) hit ngay lập tức
+        for item in merged:
+            t = (item.get("title") or "").strip().lower()
+            if t and t not in _candidates:
+                _candidates[t] = {"ts": now, "list": [item]}
 
 
 def _cached_candidates(query: str) -> list:
@@ -1346,6 +1355,13 @@ def _resolve_nct(title: str) -> dict:
         cands = [{"title": title, "youtube_url": title}]
     else:
         cands = _rank_candidates("nhaccuatui", title, RESOLVE_CANDIDATES)
+        if not cands:
+            clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', title)
+            if ' - ' in clean_title:
+                clean_title = clean_title.split(' - ')[0]
+            clean_title = clean_title.strip()
+            if clean_title and clean_title.lower() != title.lower():
+                cands = _rank_candidates("nhaccuatui", clean_title, RESOLVE_CANDIDATES)
     if not cands:
         raise RuntimeError("nhaccuatui: search không có kết quả cho tên này")
     last_err = None
@@ -2365,15 +2381,15 @@ def _radio_body(key: str, url: str):
                 gen.close()
             except Exception:
                 pass
-            # Dax cap CHUONGRU queue (du lieu cua client da mat) de
-            # put(done) khong bi chan; de NGUYEN item done: neu reader con
-            # song se thuoc duoc `done` va thoat trong sach.
+            if q.full():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
             try:
-                while True:
-                    _tag, _ = q.get_nowait()
-            except queue.Empty:
+                q.put_nowait(done)
+            except queue.Full:
                 pass
-            q.put(done)
 
     worker = threading.Thread(target=pump, daemon=True)
     worker.start()
