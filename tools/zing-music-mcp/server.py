@@ -1384,8 +1384,10 @@ def _resolve_nct(title: str) -> dict:
             if not matches:
                 last_err = RuntimeError(f"không tìm thấy link stream trong trang {target_url}")
                 continue
-            hq = [m for m in matches if "_hq.mp3" in m]
-            direct = hq[0] if hq else matches[0]
+            # Ưu tiên bản standard 128k (không chứa _hq.mp3) vì nhẹ hơn gấp 3-4 lần (4MB vs 15MB),
+            # giúp tải cực nhanh và transcode tức thì trên CPU free của Render.
+            standard = [m for m in matches if "_hq.mp3" not in m]
+            direct = standard[0] if standard else matches[0]
             direct = direct.replace('\\u002F', '/').replace('&amp;', '&')
 
             entry = {
