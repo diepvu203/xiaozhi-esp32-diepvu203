@@ -1465,6 +1465,17 @@ def _resolve_soundcloud(title: str) -> dict:
         f"soundcloud: hết {len(cands)} ứng viên cho '{title}', last={last_err}")
 
 
+def _youtube_oembed_title(url: str) -> str:
+    try:
+        oembed_url = "https://www.youtube.com/oembed?url=" + urllib.parse.quote(url) + "&format=json"
+        req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+            return (data.get("title") or "").strip()
+    except Exception:
+        return ""
+
+
 def _resolve(key: str, title: str) -> dict:
     """Dispatcher đa nguồn: thử lần lượt các nguồn theo SOURCES. Nguồn vừa
     gặp bot-check được tạm bỏ qua (cooldown) để request sau không mất thêm
@@ -1479,8 +1490,19 @@ def _resolve(key: str, title: str) -> dict:
         t_low = title.lower()
         t0 = time.time()
         if "youtube.com" in t_low or "youtu.be" in t_low:
-            entry = _resolve_youtube(title)
-            entry["source"] = "youtube"
+            try:
+                entry = _resolve_youtube(title)
+                entry["source"] = "youtube"
+            except Exception as e:
+                # YouTube bị bot-check -> lấy tên bài qua oEmbed rồi fallback sang NCT / SoundCloud
+                sys.stderr.write(f"[music] youtube direct URL loi: {e} -> thu lay title qua oEmbed de fallback\n")
+                sys.stderr.flush()
+                song_title = _youtube_oembed_title(title)
+                if song_title:
+                    sys.stderr.write(f"[music] oEmbed title='{song_title}' -> fallback sang cac nguon khac\n")
+                    sys.stderr.flush()
+                    return _resolve(key, song_title)
+                raise
         elif "soundcloud.com" in t_low:
             entry = _resolve_soundcloud(title)
             entry["source"] = "soundcloud"
