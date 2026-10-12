@@ -83,6 +83,10 @@ The build script changes local `sdkconfig` and build state. Do not assume the bu
 
 ## Authoritative Documentation
 
+- Master documentation index & feature guides: `docs/README.md` (Start here when asked to read docs or work on features)
+- Troubleshooting & debug history: `docs/troubleshooting.md`
+- Firmware & server MCP architecture: `docs/firmware-knowledge-notes.md`
+- Robot hardware & boards: `docs/robot-movement.md`, `docs/bread-compact-wifi-lcd.md`
 - Overview and SDK policy: `README.md`
 - SDK compatibility: `docs/esp-idf-6-migration.md`
 - Board guide: `docs/custom-board.md`
