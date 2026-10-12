@@ -160,6 +160,7 @@ public:
     // with locally-decoded music (which still reaches the speaker through
     // PushPcmToPlaybackQueue). Set true when music starts, false when it stops.
     void SetMusicPlaying(bool playing);
+    bool IsMusicPlaying() const { return music_playing_.load(); }
 
 private:
     AudioCodec* codec_ = nullptr;

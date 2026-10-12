@@ -24,7 +24,7 @@ Nếu bạn (hoặc AI) cần làm tác vụ dưới đây, hãy mở ngay file 
 
 | Tác vụ / Vấn đề cần giải quyết | File cần đọc | Nội dung trọng tâm |
 |---|---|---|
-| 🐞 **Gặp lỗi crash, giật tiếng, lỗi mạng, lỗi stream** | [`troubleshooting.md`](troubleshooting.md) | 17 lỗi thường gặp (lệch format log `%lld`, FFmpeg `-re`, buffer overrun, task watchdog, reset chip...) |
+| 🐞 **Gặp lỗi crash, giật tiếng, lỗi mạng, lỗi stream** | [`troubleshooting.md`](troubleshooting.md) | 18 lỗi thường gặp (lệch format log `%lld`, FFmpeg `-re`, buffer overrun, điếc mic sau khi dừng nhạc...) |
 | 🤖 **Lập trình xe robot, động cơ L298N, chống rơi vực ToF** | [`robot-movement.md`](robot-movement.md)<br>[`bread-compact-wifi-lcd.md`](bread-compact-wifi-lcd.md) | Sơ đồ chân động cơ, giải quyết nhiễu điện từ EMI, thuật toán chống rơi bàn, cấu hình chân theo từng board |
 | 📺 **Cấu hình board LCD màu ST7789 (`bread-compact-wifi-lcd`)** | [`bread-compact-wifi-lcd.md`](bread-compact-wifi-lcd.md) | Pinout riêng của board LCD (ToF SDA=17, SCL=39, motor, lamp GPIO 18, ST7789 SPI) |
 | 😊 **Tùy chỉnh màn hình OLED SSD1306, biểu cảm emoji, GIF** | [`emoji-gif-display.md`](emoji-gif-display.md) | Bộ nhớ OLED, render frame GIF, biểu cảm trạng thái AI |
@@ -46,7 +46,7 @@ Nếu bạn (hoặc AI) cần làm tác vụ dưới đây, hãy mở ngay file 
 
 | File | Mô tả chi tiết |
 |---|---|
-| [`troubleshooting.md`](troubleshooting.md) | **Tổng hợp lỗi & cách fix:** Chi tiết 17 lỗi đã gặp trong quá trình làm robot, phát nhạc, audio pipeline. |
+| [`troubleshooting.md`](troubleshooting.md) | **Tổng hợp lỗi & cách fix:** Chi tiết 18 lỗi đã gặp trong quá trình làm robot, phát nhạc, audio pipeline. |
 | [`robot-movement.md`](robot-movement.md) | **Robot xe cơ bản:** Motor N20 + Driver L298N + Cảm biến ToF VL53L0X, xử lý nhiễu điện từ EMI (board OLED). |
 | [`bread-compact-wifi-lcd.md`](bread-compact-wifi-lcd.md) | **Biến thể LCD ST7789:** Ghi chú port tính năng robot & ToF sang board LCD, bảng chân GPIO chi tiết. |
 | [`emoji-gif-display.md`](emoji-gif-display.md) | **Màn hình OLED 128x64:** Hiển thị Emoji động & GIF tương ứng với trạng thái trợ lý ảo. |

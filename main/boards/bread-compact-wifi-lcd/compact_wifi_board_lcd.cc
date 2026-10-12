@@ -259,9 +259,7 @@ private:
                     if (scheduled_app.GetDeviceState() == kDeviceStateSpeaking) {
                         scheduled_app.AbortSpeaking(kAbortReasonNone);
                     }
-                    if (scheduled_app.GetDeviceState() != kDeviceStateListening) {
-                        scheduled_app.StartListening();
-                    }
+                    scheduled_app.StartListeningAuto();
                 });
                 return;
             }

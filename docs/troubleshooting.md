@@ -320,3 +320,29 @@ mới là fix trực tiếp cho lỗi "văng socket" (`Failed to open connection
 2. **`errs` tăng nhanh (hàng trăm)** → stream MP3 hỏng → xem lại server ffmpeg
 3. **`RSSI` < -70** → sóng yếu, cải thiện vị trí robot
 4. **Stats 5 giây/lần**: `stats: buffered X B, errs N, RSSI Y dBm` (qua `esp_wifi_sta_get_ap_info`)
+
+---
+
+## 18. Hết bài hoặc nhấn nút dừng nhạc thì robot bị "điếc" (12s sau mới nghe lại)
+
+### Triệu chứng
+- Khi bài hát kết thúc tự nhiên, hoặc khi nhấn nút BOOT để dừng bài hát đang phát:
+- Màn hình/log báo robot đang ở trạng thái `listening`, mic đã bật nhưng người dùng nói thì robot **hoàn toàn không phản hồi**.
+- Khoảng 12 giây sau xuất hiện log:
+  `MQTT: Closing audio channel, send_goodbye: 1`
+  `StateMachine: State: listening -> idle`
+- Sau khi rơi về `idle`, gọi lại wake-word hoặc nhấn nút lần nữa thì robot mới chịu nghe và trả lời.
+
+### Nguyên nhân gốc rễ (Root Cause)
+1. **Bị kích hoạt nhầm chế độ `manual` (Push-to-Talk):**
+   - Hàm `Application::StartListening()` gửi lên server gói tin `{"type":"listen","state":"start","mode":"manual"}`.
+   - Chế độ `manual` quy định server **chờ client gửi lệnh nhả nút (`stop`)** thì mới chạy AI. Vì người dùng chỉ click nhả nút chứ không nhấn giữ, server tiếp tục chờ lệnh `stop` suốt 12 giây cho tới khi timeout đóng kết nối (`goodbye`).
+2. **Lệch trạng thái phiên (Session Desync) khi phát nhạc:**
+   - Lúc AI nói xong câu mở bài ("Đang phát..."), server gửi `tts stop`.
+   - Firmware chuyển `speaking -> listening` nhưng mic thì đã bị tắt trong lúc nhạc stream. Kênh audio treo suốt 60s cho tới khi server timeout.
+   - Nếu bấm nút dừng nhạc trong lúc state đang `listening`, code cũ bỏ qua không mở lại kênh mới.
+
+### Cách khắc phục
+1. Bổ sung `Application::StartListeningAuto()`: Đặt chế độ `kListeningModeAutoStop` (mode = `"auto"`), kích hoạt VAD tự động ngắt câu khi người dùng nói xong.
+2. Trong `music_player.cc` (khi hết bài) và trong callback nút dừng nhạc (`compact_wifi_board*.cc`): Đổi từ `StartListening()` sang `StartListeningAuto()`.
+3. Trong `Application::OnIncomingJson` (`tts stop`): Nếu `audio_service_.IsMusicPlaying()`, chủ động đóng kênh audio (`CloseAudioChannel()`) và đưa về `kDeviceStateIdle` để dọn dẹp sạch phiên nói chuyện cũ, không để server treo 60s.

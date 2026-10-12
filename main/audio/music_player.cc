@@ -497,7 +497,7 @@ void MusicPlayer::StreamTask(std::string url) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
         if (!stop_requested_.load()) {
-            Application::GetInstance().StartListening();
+            Application::GetInstance().StartListeningAuto();
         }
     }
     FinishTask();

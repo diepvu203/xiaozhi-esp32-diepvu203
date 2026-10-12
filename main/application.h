@@ -8,6 +8,7 @@
 
 #include <string>
 #include <mutex>
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <functional>
@@ -94,10 +95,16 @@ public:
     void ToggleChatState();
 
     /**
-     * Start listening (event-based, thread-safe)
+     * Start listening (event-based, thread-safe, manual stop)
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
      */
     void StartListening();
+
+    /**
+     * Start listening in auto stop mode (VAD voice detection, thread-safe)
+     * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
+     */
+    void StartListeningAuto();
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -140,6 +147,7 @@ private:
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
+    std::atomic<ListeningMode> desired_listening_mode_{kListeningModeAutoStop};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;

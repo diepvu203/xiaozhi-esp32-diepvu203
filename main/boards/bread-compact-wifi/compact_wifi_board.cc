@@ -129,9 +129,7 @@ private:
                     if (a.GetDeviceState() == kDeviceStateSpeaking) {
                         a.AbortSpeaking(kAbortReasonNone);
                     }
-                    if (a.GetDeviceState() != kDeviceStateListening) {
-                        a.StartListening();
-                    }
+                    a.StartListeningAuto();
                 });
                 return;
             }

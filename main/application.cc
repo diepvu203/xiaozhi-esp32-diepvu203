@@ -571,7 +571,14 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
+                        if (audio_service_.IsMusicPlaying()) {
+                            // While music is streaming, mic is muted. Close audio channel cleanly
+                            // so server does not hang waiting for audio in a ghost session.
+                            if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                                protocol_->CloseAudioChannel();
+                            }
+                            SetDeviceState(kDeviceStateIdle);
+                        } else if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
@@ -713,7 +720,16 @@ void Application::DismissAlert() {
 
 void Application::ToggleChatState() { xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT); }
 
-void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING); }
+void Application::StartListening() {
+    desired_listening_mode_.store(kListeningModeManualStop);
+    xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
+}
+
+void Application::StartListeningAuto() {
+    desired_listening_mode_.store(kListeningModeAutoStop);
+    play_popup_on_listening_ = true;
+    xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
+}
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
@@ -793,17 +809,27 @@ void Application::HandleStartListeningEvent() {
         return;
     }
 
+    ListeningMode mode = desired_listening_mode_.load();
+
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeManualStop); });
+            Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
             return;
         }
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(mode);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(mode);
+    } else if (state == kDeviceStateListening) {
+        if (!protocol_->IsAudioChannelOpened()) {
+            SetDeviceState(kDeviceStateConnecting);
+            Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
+            return;
+        }
+        SetListeningMode(mode);
+        protocol_->SendStartListening(mode);
     }
 }
 
