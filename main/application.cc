@@ -10,6 +10,7 @@
 #include "system_info.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
+#include "music_player.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -853,6 +854,11 @@ void Application::HandleWakeWordDetectedEvent() {
         return;
     }
 
+    if (MusicPlayer::GetInstance().IsPlaying()) {
+        ESP_LOGI(TAG, "Wake word detected while music playing: stopping music");
+        MusicPlayer::GetInstance().Stop();
+    }
+
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
@@ -1006,6 +1012,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            speaking_start_time_ms_ = esp_timer_get_time() / 1000;
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -1076,7 +1083,7 @@ void Application::SetListeningMode(ListeningMode mode) {
 }
 
 ListeningMode Application::GetDefaultListeningMode() const {
-    return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
+    return kListeningModeAutoStop;
 }
 
 void Application::Reboot() {

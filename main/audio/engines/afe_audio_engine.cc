@@ -35,6 +35,12 @@ AfeAudioEngine::~AfeAudioEngine() {
     if (wake_word_encode_task_buffer_ != nullptr) {
         heap_caps_free(wake_word_encode_task_buffer_);
     }
+    if (afe_task_stack_ != nullptr) {
+        heap_caps_free(afe_task_stack_);
+    }
+    if (afe_task_buffer_ != nullptr) {
+        heap_caps_free(afe_task_buffer_);
+    }
     if (owns_models_ && models_ != nullptr) {
         esp_srmodel_deinit(models_);
     }
@@ -126,18 +132,19 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
         ? nullptr
         : esp_srmodel_filter(models_, ESP_VADN_PREFIX, nullptr);
     afe_config_t* afe_config = afe_config_init(
-        input_format.c_str(), models_, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+        input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     if (afe_config == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE configuration");
         return false;
     }
 
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
-    afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
+    afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
+    afe_config->aec_nlp_level = AEC_NLP_LEVEL_AGGR;
     afe_config->ns_init = false;
-    afe_config->vad_init = kUseAfeForVoiceProcessing;
+    afe_config->vad_init = true;
     afe_config->vad_mode = VAD_MODE_0;
+    afe_config->vad_min_speech_ms = 128;
     afe_config->vad_min_noise_ms = 100;
     if (vad_model_name != nullptr) {
         afe_config->vad_model_name = vad_model_name;
@@ -170,12 +177,30 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms, srmode
     }
     afe_iface_->print_pipeline(afe_data_);
 
-    BaseType_t task_created = xTaskCreate([](void* arg) {
-        auto* engine = static_cast<AfeAudioEngine*>(arg);
-        engine->ProcessingTask();
-        vTaskDelete(nullptr);
-    }, "audio_afe", 4096, this, 3, &processing_task_);
-    if (task_created != pdPASS) {
+    const size_t afe_stack_size = 4096;
+    if (afe_task_stack_ == nullptr) {
+        afe_task_stack_ = static_cast<StackType_t*>(
+            heap_caps_malloc(afe_stack_size, MALLOC_CAP_SPIRAM));
+    }
+    if (afe_task_buffer_ == nullptr) {
+        afe_task_buffer_ = static_cast<StaticTask_t*>(
+            heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL));
+    }
+    if (afe_task_stack_ != nullptr && afe_task_buffer_ != nullptr) {
+        processing_task_ = xTaskCreateStatic([](void* arg) {
+            auto* engine = static_cast<AfeAudioEngine*>(arg);
+            engine->ProcessingTask();
+            vTaskDelete(nullptr);
+        }, "audio_afe", afe_stack_size, this, 3, afe_task_stack_, afe_task_buffer_);
+    } else {
+        xTaskCreate([](void* arg) {
+            auto* engine = static_cast<AfeAudioEngine*>(arg);
+            engine->ProcessingTask();
+            vTaskDelete(nullptr);
+        }, "audio_afe", afe_stack_size, this, 3, &processing_task_);
+    }
+
+    if (processing_task_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE processing task");
         afe_iface_->destroy(afe_data_);
         afe_data_ = nullptr;

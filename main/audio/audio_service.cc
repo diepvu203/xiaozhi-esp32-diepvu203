@@ -278,11 +278,10 @@ void AudioService::AudioInputTask() {
             continue;
         }
 
-        // While music is streaming, silence the microphone so the wake-word
-        // engine cannot interrupt playback. Disable the codec input to save
-        // power; ReadAudioData will re-enable it when music_playing_ goes
-        // back to false.
-        if (music_playing_.load()) {
+        // While music is streaming, silence the microphone only if the board does NOT
+        // have reference audio for AEC. With AEC and input reference, keep the mic
+        // alive so the wake-word engine can interrupt playback.
+        if (music_playing_.load() && !codec_->input_reference()) {
             if (codec_->input_enabled()) {
                 codec_->EnableInput(false);
             }

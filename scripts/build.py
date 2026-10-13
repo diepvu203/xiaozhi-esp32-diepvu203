@@ -55,7 +55,10 @@ def get_project_version() -> Optional[str]:
 
 
 def _run_idf(*args: str, preview: bool = False) -> None:
-    command = ["idf.py"]
+    if sys.platform == "win32" and "IDF_PATH" in os.environ:
+        command = [sys.executable, str(Path(os.environ["IDF_PATH"]) / "tools" / "idf.py")]
+    else:
+        command = ["idf.py"]
     if preview:
         command.append("--preview")
     command.extend(args)

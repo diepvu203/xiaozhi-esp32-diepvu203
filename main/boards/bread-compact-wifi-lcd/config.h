@@ -6,6 +6,10 @@
 #define AUDIO_INPUT_SAMPLE_RATE  16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 
+// 2x INMP441 microphones: Mic 1 (L/GND) for speech, Mic 2 (R/3.3V) for speaker AEC reference
+#define AUDIO_INPUT_REFERENCE    true
+#define AUDIO_INPUT_CHANNELS     2
+
 // 如果使用 Duplex I2S 模式，请注释下面一行
 #define AUDIO_I2S_METHOD_SIMPLEX
 

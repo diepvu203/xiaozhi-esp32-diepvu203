@@ -63,14 +63,36 @@ bool MusicPlayer::Play(const std::string& url) {
     running_.store(true);
 
     auto* arg = new std::string(url);
-    BaseType_t ok = xTaskCreate(
-        [](void* p) {
-            std::unique_ptr<std::string> url(static_cast<std::string*>(p));
-            MusicPlayer::GetInstance().StreamTask(*url);
-            vTaskDelete(nullptr);
-        },
-        "music", kTaskStackBytes, arg, kTaskPriority, &task_handle_);
-    if (ok != pdPASS) {
+    static StackType_t* music_task_stack = nullptr;
+    static StaticTask_t* music_task_buf = nullptr;
+    if (music_task_stack == nullptr) {
+        music_task_stack = static_cast<StackType_t*>(
+            heap_caps_malloc(kTaskStackBytes, MALLOC_CAP_SPIRAM));
+    }
+    if (music_task_buf == nullptr) {
+        music_task_buf = static_cast<StaticTask_t*>(
+            heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL));
+    }
+
+    if (music_task_stack != nullptr && music_task_buf != nullptr) {
+        task_handle_ = xTaskCreateStatic(
+            [](void* p) {
+                std::unique_ptr<std::string> url(static_cast<std::string*>(p));
+                MusicPlayer::GetInstance().StreamTask(*url);
+                vTaskDelete(nullptr);
+            },
+            "music", kTaskStackBytes, arg, kTaskPriority, music_task_stack, music_task_buf);
+    } else {
+        xTaskCreate(
+            [](void* p) {
+                std::unique_ptr<std::string> url(static_cast<std::string*>(p));
+                MusicPlayer::GetInstance().StreamTask(*url);
+                vTaskDelete(nullptr);
+            },
+            "music", kTaskStackBytes, arg, kTaskPriority, &task_handle_);
+    }
+
+    if (task_handle_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create music task");
         running_.store(false);
         delete arg;
@@ -128,6 +150,12 @@ void MusicPlayer::StreamTask(std::string url) {
     // Mute TTS immediately so it does not compete for the radio while we are
     // connecting/reconnecting to the music server.
     audio.SetMusicPlaying(true);
+    Application::GetInstance().Schedule([]() {
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() == kDeviceStateSpeaking) {
+            app.AbortSpeaking(kAbortReasonNone);
+        }
+    });
 
     esp_http_client_handle_t client = nullptr;
 

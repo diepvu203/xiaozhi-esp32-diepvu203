@@ -92,6 +92,8 @@ private:
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t* wake_word_encode_task_buffer_ = nullptr;
     StackType_t* wake_word_encode_task_stack_ = nullptr;
+    StaticTask_t* afe_task_buffer_ = nullptr;
+    StackType_t* afe_task_stack_ = nullptr;
     WakeWordAudioCache wake_word_audio_cache_;
     std::deque<std::vector<uint8_t>> wake_word_opus_;
     std::mutex wake_word_mutex_;

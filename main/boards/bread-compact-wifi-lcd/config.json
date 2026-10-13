@@ -6,7 +6,11 @@
             "name": "bread-compact-wifi-lcd",
             "sdkconfig_append": [
                 "CONFIG_LCD_ST7789_240X240=y",
-                "CONFIG_VOICE_TRIGGER_ENABLED=y"
+                "CONFIG_VOICE_TRIGGER_ENABLED=y",
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
+                "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256",
+                "CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y"
             ]
         }
     ]
