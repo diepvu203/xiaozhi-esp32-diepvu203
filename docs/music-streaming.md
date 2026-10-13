@@ -60,29 +60,25 @@ MusicPlayer: HTTP chunk → decode esp_audio_dec → push AudioService queue →
 | `GetOutputSampleRate()` | Trả sample rate codec (24000 default) cho MusicPlayer resample |
 | `SetMusicPlaying(bool)` | Mute TTS khi nhạc phát + **tắt codec input** (mic) để wake-word không cắt ngang |
 | `PushPcmToPlaybackQueue(pcm, max_queue_depth)` | Push PCM với jitter buffer depth (music=20, TTS=8) |
-## 5. Đa nguồn: SoundCloud là nguồn chính
+## 5. Đa nguồn: NhacCuaTui (NCT) & SoundCloud là nguồn chính
 
-**Vì sao**: YouTube chạy vài chục bài rồi chết — cookie/PO token bị Google **revoke
-session** khi IP không cố định (Render free xoay IP), hoặc IP datacenter bị gắn cờ →
-`Sign in to confirm you're not a bot`.
+**Thứ tự ưu tiên hiện tại**: `nhaccuatui,soundcloud,youtube` (cấu hình qua `YTDLP_SOURCES`).
 
-| | YouTube | SoundCloud |
+| Nguồn | Ưu điểm | Hạn chế & Lưu ý |
 |---|---|---|
-| Auth | cookie + PO token (dễ hỏng) | không cần gì |
-| Bot-check theo IP | có | không |
-| Sống được | vài chục bài | lâu dài |
-| Bài Việt | đầy đủ | nhiều (J97, Sơn Tùng…) |
+| **Nhạc Của Tui (NCT)** | Kho nhạc Việt phong phú, stream MP3 128k trực tiếp cực nhanh, không bot-check, không cần auth. | Nhạc quốc tế ít hơn SoundCloud/YouTube. |
+| **SoundCloud** | Ổn định lâu dài, không cần cookie/PO token, nhạc quốc tế/remix/EDM phong phú. | Trên IP datacenter dùng chung (như Render free), đôi khi bị SoundCloud rate-limit (`{"error": "Rate Limit Exceeded"}`). |
+| **YouTube** | Kho dữ liệu đầy đủ nhất. | IP datacenter dễ bị bot-check Google (`Sign in to confirm you're not a bot`), cần cookies/PO token. |
 
-- Mặc định `YTDLP_SOURCES=soundcloud,youtube` (đổi được)
-- `YTDLP_SOURCE_COOLDOWN` (900s): nguồn vừa gặp bot-check thì bỏ qua 15 phút
-- `YTDLP_RESOLVE_CANDIDATES` (2): thử thêm N video cùng tên khi ứng viên đầu hỏng
+- **Xử lý SoundCloud Rate Limit trên Render**: Khi IP Render bị SoundCloud trả `Rate Limit Exceeded`, server tự động fallback sang nguồn tiếp theo trong danh sách hoặc dùng nguồn `nhaccuatui` làm ưu tiên 1.
+- `YTDLP_SOURCE_COOLDOWN` (900s): nguồn vừa gặp bot-check thì bỏ qua 15 phút.
+- `YTDLP_RESOLVE_CANDIDATES` (2): thử thêm N video cùng tên khi ứng viên đầu hỏng.
 - `_SC_FORMAT = "bestaudio[protocol^=http]/bestaudio/best"` — **ưu tiên progressive
   `http_mp3` hơn HLS `hls_aac_160k`** (m3u8 phải `_download_ffmpeg`, chậm + hay
   reconnect; progressive đi `_fetch_chunked` + `_transcode_local`, resume được).
-  Đo được: **>60s → 13s**
+  Đo được: **>60s → 13s**.
 - `_rank_candidates`: lấy đủ **10** ứng viên (`_FETCH_PER_SOURCE`) **rồi mới** xếp hạng
-  theo độ khớp tên (`_MAX_PER_SOURCE=3` chỉ áp cho kết quả trả về) — trước đây lấy 3
-  rồi xếp hạng một tập đã sai thứ tự nên bài đúng bị chôn ở #5
+  theo độ khớp tên (`_MAX_PER_SOURCE=3` chỉ áp cho kết quả trả về).
 
 ### ZingMP3 — thử đủ, KHÔNG làm được (kết luận)
 1. Search API → `-403 You don't have permission` (đúng thuật toán HMAC-SHA512 vẫn bị chặn)
@@ -113,14 +109,15 @@ offset để resume; firmware chấp nhận 200 và reset decoder để nghe ti�
   Sửa: prune cả file tạm + gọi `_prune_cache()` ở **nhánh `failed`**.
 - Cache candidate TTL 10 phút — `_rank_candidates` dùng chung cache của `search_song`
   (trước đây resolve search lại y hệt, tốn ~10s)
-## 8. Chống xen tiếng TTS khi phát nhạc
+## 8. Chống xen tiếng TTS & Cơ chế ngắt bài hát khi phát nhạc
 
 `AudioService::SetMusicPlaying(true)` được gọi **ngay đầu task** (trước handshake):
-- Mute TTS (không xen tiếng robot vào nhạc)
-- **Tắt codec input (mic)** → wake word không cắt ngang nhạc
-- ⚠️ Hệ quả: **không ra lệnh bằng giọng được khi đang phát**. Dừng bằng:
-  1. AI gọi `self.music.stop`
-  2. **Nhấn nút wakeup** trên robot → board gọi `MusicPlayer::Stop()`
+- **Mute TTS**: Tự động gọi `Application::GetInstance().AbortSpeaking()` để không xen tiếng TTS dở dang vào nhạc.
+- **Xử lý Micro khi đang phát nhạc**:
+  - **Với board 1 mic (không có AEC hardware reference)**: Tắt codec input (mic) để tiếng nhạc không kích hoạt nhầm wake-word. Dừng bài hát bằng:
+    1. AI gọi `self.music.stop`
+    2. **Nhấn nút wakeup / BOOT** trên robot → board gọi `MusicPlayer::Stop()`.
+  - **Với board 2 mic (hỗ trợ AEC, như `bread-compact-wifi-lcd`)**: Codec cấu hình `input_reference = true`. Micro **vẫn được giữ bật** (`music_playing_` không tắt mic nếu có `input_reference`). Mic 2 thu âm tham chiếu từ loa và chuyển qua bộ lọc AEC để triệt tiêu tiếng nhạc, cho phép người dùng **nói câu wake-word để ngắt bài hát trực tiếp bằng giọng nói**!
 
 ## 9. Nút wakeup dừng được nhạc (29/09/2026)
 

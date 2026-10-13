@@ -76,17 +76,52 @@ the existing build cache has a different target, then flash and verify:
 3. Forward motion is blocked at a detected table edge; reverse/stop still work.
 4. Wake-word wiggle, BOOT behavior, and music play/stop/listening behavior.
 5. Lamp MCP control, if this feature is required by the deployment.
+6. 2x INMP441 mic recognition and AEC echo suppression during music playback.
 
 Motor and cliff-protection behavior must be tested physically with wheels
 raised first, then in a controlled environment. Compile success alone does not
 validate pin wiring or safety behavior.
 
+## Dual Microphone Array & Hardware AEC (2x INMP441)
+
+To support wake-word barge-in during loud music or TTS playback, the board is configured with a dual INMP441 microphone setup using I2S Simplex Stereo:
+
+| Micro | Chân L/R | Kênh I2S | Vai trò trong ESP-SR AFE |
+|---|---|---|---|
+| **Mic 1** | Nối **GND** | Left (`M`) | Thu giọng nói người dùng |
+| **Mic 2** | Nối **3.3V** | Right (`R`) | Đặt gần loa thu tín hiệu tham chiếu khử vọng (AEC) |
+
+- **I2S Simplex**: Dùng chung các chân I2S input `SCK = GPIO 5`, `WS = GPIO 4`, `DIN = GPIO 6`.
+- **Cấu hình Codec ([`config.h`](file:///d:/xiaozhi/xiaozhi-esp32-diepvu203/main/boards/bread-compact-wifi-lcd/config.h))**:
+  ```c
+  #define AUDIO_INPUT_REFERENCE    true
+  #define AUDIO_INPUT_CHANNELS     2
+  ```
+- **Xử lý tín hiệu**:
+  - `NoAudioCodecSimplex`: Mở I2S Stereo (`I2S_SLOT_MODE_STEREO`, `I2S_STD_SLOT_BOTH`). Độ nhạy mic sử dụng bit shift cố định `>> 12` (không dùng AutoGain động để tránh hụt giọng nói).
+  - `AfeAudioEngine`: Nhận chuỗi kênh `"MR"` và khởi tạo `afe_config->aec_init = true` với chế độ `AEC_MODE_SR_LOW_COST`, NLP `AEC_NLP_LEVEL_AGGR`, và VAD bật.
+  - `AudioService`: Khi phát nhạc (`music_playing_ = true`), micro **vẫn được giữ bật** nếu `codec_->input_reference()` hoạt động, cho phép robot nhận diện wake-word ngắt nhạc bằng giọng nói thay vì phải bấm nút BOOT vật lý.
+
+## Tối ưu bộ nhớ PSRAM cho Audio & Mạng
+
+- **Static Task Allocation trên PSRAM**: Task xử lý âm thanh `audio_afe` và task phát nhạc `music` cấp phát stack trên PSRAM (`MALLOC_CAP_SPIRAM`), tránh cạn kiệt Internal SRAM khi bật AEC và giải mã MP3 đồng thời.
+- **Tự động ngắt TTS**: Khi `MusicPlayer::StreamTask` bắt đầu mở luồng nhạc, hệ thống tự động gọi `AbortSpeaking()` nếu robot đang đọc thông báo dở dang, giải phóng queue âm thanh ngay lập tức.
+- **Config Flags (`config.json`)**:
+  - `CONFIG_USE_DEVICE_AEC=y`
+  - `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`
+  - `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256`
+  - `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`
+
 ## Files changed / relevant
 
-- `main/boards/bread-compact-wifi-lcd/config.json` — selects ST7789 240x240.
-- `main/boards/bread-compact-wifi-lcd/config.h` — LCD-board motor and ToF pins.
+- `main/boards/bread-compact-wifi-lcd/config.json` — selects ST7789 240x240 and audio/PSRAM configs.
+- `main/boards/bread-compact-wifi-lcd/config.h` — LCD-board motor, ToF, and 2-mic AEC settings.
 - `main/boards/bread-compact-wifi-lcd/compact_wifi_board_lcd.cc` — MCP tools,
   ToF hookup, BOOT/music handling, and wake-word motor feedback.
+- `main/audio/codecs/no_audio_codec.cc` & `.h` — Stereo I2S simplex capture for dual-mic input.
+- `main/audio/engines/afe_audio_engine.cc` & `.h` — Dual-channel `"MR"` AEC pipeline with PSRAM stack.
+- `main/audio/audio_service.cc` — Conditional mic keep-alive during music streaming when AEC is enabled.
+- `main/audio/music_player.cc` — PSRAM stack for music stream task and auto abort speaking on play.
 - `main/CMakeLists.txt` — VL53L0X sources and compile definition for both
   compact Wi-Fi variants.
 - `main/boards/common/motor_controller.h` and `tof_sensor.h` — shared motor
